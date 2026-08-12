@@ -9,12 +9,28 @@ description = "Demand and price elasticity estimation with integrable context-de
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
-dependencies = [
-    "numpy>=1.24",
-    "pandas>=2.0",
-    "torch>=2.0",
-    "pyyaml>=6.0",
+authors = [
+  { name = "Carlos Heredia", email = "TU_EMAIL@ejemplo.com" },
 ]
+keywords = ["elasticity", "demand", "pricing", "deep-learning"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "numpy>=1.24",
+  "pandas>=2.0",
+  "torch>=2.0",
+  "pyyaml>=6.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/carlosherediapimienta/ICDN"
+Repository = "https://github.com/carlosherediapimienta/ICDN"
+Issues = "https://github.com/carlosherediapimienta/ICDN/issues"
 
 [project.optional-dependencies]
 dev = ["pytest>=7.4", "ruff>=0.4"]
