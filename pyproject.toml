@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [
-  { name = "Carlos Heredia", email = "TU_EMAIL@ejemplo.com" },
+  { name = "Carlos Heredia", email = "carlosherediapimienta@gmail.com" },
 ]
 keywords = ["elasticity", "demand", "pricing", "deep-learning"]
 classifiers = [
