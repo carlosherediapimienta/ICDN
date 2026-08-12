@@ -85,9 +85,7 @@ icdn elasticities --model artifacts/model.icdn --data panel.parquet --out elasti
 ## Development
 
 ```bash
-pip install -e ".[dev]"
-pytest
-ruff check .
+pip install icdn
 ```
 
 ## License
