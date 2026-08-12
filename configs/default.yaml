@@ -1,0 +1,61 @@
+# Default ICDN configuration.
+# Values reproduce the setup selected by the hyperparameter search of the
+# original study on weekly retail scanner data.
+
+schema:
+  store: store_code
+  product: product_code
+  period: week_id
+  price: price
+  units: units
+  promo: on_promo
+  category: null
+  brand: null
+  style: null
+  size: null
+  values_are_log: false
+
+n_products: null
+
+# Feature engineering
+lags: [1, 2, 4]
+rolling_windows: [4, 13]
+seasonal_periods: [52, 26, 13]
+min_coverage: 0.5
+new_product_periods: 13
+
+# Architecture
+n_knots: 3
+hidden: [256, 128, 64]
+activation: gelu
+dropout: 0.2547
+k_neighbors: 4
+d_store: 16
+d_brand: 8
+d_style: 8
+use_cross: true
+
+# Objective
+huber_delta: 1.0
+lambda_smooth: 0.0351
+lambda_elast: 0.0445
+own_elasticity_bounds: [-5.0, 0.0]
+cross_elasticity_bounds: [-1.0, 1.0]
+
+# Training
+batch_size: 256
+warmup_epochs: 350
+epochs: 400
+warmup_lr: 0.0016856
+lr: 0.0016246
+weight_decay: 0.00001
+grad_clip: 1.0
+lr_patience: 30
+early_stopping_patience: 70
+smoothing_window: 8
+beta_prior: -2.0
+validation_fraction: 0.2
+seed: 42
+device: auto
+num_workers: 0
+verbose: true
