@@ -52,8 +52,9 @@ class SmoothnessPenalty:
         u: torch.Tensor,
         Bx: torch.Tensor,
         pairs: torch.Tensor,
+        attn_weights: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        kappa = self.curvature_calc.run(w, ddBx, u, Bx, pairs)
+        kappa = self.curvature_calc.run(w, ddBx, u, Bx, pairs, attn_weights)
         return (kappa**2).mean()
 
 
@@ -108,12 +109,13 @@ class ElasticityLoss(nn.Module):
         Bx: torch.Tensor,
         pairs: torch.Tensor,
         E: torch.Tensor | None = None,
+        attn_weights: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         mask = obs_mask.bool()
         loss_fit = self.fit_loss(y_hat[mask], y_true[mask]) if mask.any() else y_hat.new_tensor(0.0)
 
         if self.lambda_smooth > 0.0:
-            loss_smooth = self.smoothness_penalty.run(w, ddBx, u, Bx, pairs)
+            loss_smooth = self.smoothness_penalty.run(w, ddBx, u, Bx, pairs, attn_weights)
         else:
             loss_smooth = y_hat.new_tensor(0.0)
 
