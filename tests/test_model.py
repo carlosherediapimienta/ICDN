@@ -8,7 +8,6 @@ from icdn.model import (
     SplineBuilder,
 )
 
-
 def build_network(n=4, n_knots=3, n_shared=5, n_product=6, n_stores=2):
     torch.manual_seed(0)
     prices = torch.randn(50, n).numpy()
@@ -97,3 +96,33 @@ def test_frozen_graph_keeps_the_same_edges():
     model(batch)
     assert torch.equal(selector.frozen_pairs, pairs_before)
     assert selector.frozen_pairs.shape[1] == 4 * 2
+
+
+def test_warmup_is_exactly_log_linear():
+    torch.manual_seed(0)
+    model = build_network()
+    batch = make_batch()
+    head = model.head.param_head
+
+    # Reproduce lo que debe hacer el trainer al entrar en fase 0.
+    for module in (head.head_w, head.head_w_cross, head.head_cross):
+        with torch.no_grad():
+            module.weight.zero_()
+            module.bias.zero_()
+        for p in module.parameters():
+            p.requires_grad = False
+
+    y_hat, _, aux = model(batch, return_parts=True, linear_warmup=True)
+    b, beta, x = aux["b"], aux["beta"], batch["prices"]
+    beta_cross, pairs = aux["beta_cross"], aux["pairs"]
+    attn = model.head.neighbor_selector.run(model.head.encoder(model.context_builder(batch)))[1]
+
+    linear = b + beta * x
+    i_idx, j_idx = pairs[0], pairs[1]
+    contrib = attn * beta_cross * x[:, j_idx]
+    linear = linear.scatter_add(1, i_idx.unsqueeze(0).expand(x.size(0), -1), contrib)
+
+    torch.testing.assert_close(y_hat, linear, atol=1e-6, rtol=1e-6)
+    assert torch.count_nonzero(aux["w"]) == 0
+    assert torch.count_nonzero(aux["w_cross"]) == 0
+    assert torch.count_nonzero(aux["u"]) == 0

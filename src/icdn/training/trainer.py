@@ -15,10 +15,10 @@ from ..model.neighbors import ProductMetadata
 class Trainer:
     """Fits an ICDN model in two phases and then freezes its competitor graph.
 
-    The warm-up phase fits smoothed demand with the spline weights frozen and
-    the price coefficient pinned to a negative prior, which anchors a stable
-    downward-sloping baseline. The main phase releases the splines and fits the
-    raw series, letting the model capture non-linear and cross-price effects
+    The warm-up phase fits smoothed demand with the spline weights frozen and set 
+    to zero and the price coefficient pinned to a negative prior, which anchors a
+    stable downward-sloping baseline. The main phase releases the splines and fits
+    the raw series, letting the model capture non-linear and cross-price effects
     without the early instability that a cold start produces.
     """
 
@@ -44,7 +44,7 @@ class Trainer:
         history = {}
 
         if cfg.warmup_epochs > 0 and warmup_train_loader is not None:
-            self._freeze_splines(model, frozen=True)
+            self._zero_and_freeze_splines(model)
             self._init_price_prior(model)
             history["warmup"] = self._run_phase(
                 model,
@@ -53,6 +53,7 @@ class Trainer:
                 lr=cfg.warmup_lr,
                 n_epochs=cfg.warmup_epochs,
                 meta=meta,
+                linear_warmup=True,
                 label="warmup",
             )
 
@@ -64,6 +65,7 @@ class Trainer:
             lr=cfg.lr,
             n_epochs=cfg.epochs,
             meta=meta,
+            linear_warmup=False,
             label="main",
         )
 
@@ -80,6 +82,7 @@ class Trainer:
         lr: float,
         n_epochs: int,
         meta: ProductMetadata | None,
+        linear_warmup: bool,
         label: str,
     ) -> dict:
         cfg = self.config
@@ -96,8 +99,16 @@ class Trainer:
         history = {"train_loss": [], "val_loss": []}
 
         for epoch in range(n_epochs):
-            train_loss = self._train_epoch(model, train_loader, loss_fn, optimizer, scaler, meta)
-            val_loss = self._evaluate_epoch(model, val_loader, loss_fn, meta)
+            train_loss = self._train_epoch(
+                model,
+                train_loader,
+                loss_fn,
+                optimizer,
+                scaler,
+                meta,
+                linear_warmup,
+            )
+            val_loss = self._evaluate_epoch(model, val_loader, loss_fn, meta, linear_warmup)
 
             history["train_loss"].append(train_loss)
             history["val_loss"].append(val_loss)
@@ -130,7 +141,7 @@ class Trainer:
         history["best_val_loss"] = best_loss
         return history
 
-    def _train_epoch(self, model, loader, loss_fn, optimizer, scaler, meta) -> float:
+    def _train_epoch(self, model, loader, loss_fn, optimizer, scaler, meta, linear_warmup: bool = False) -> float:
         cfg = self.config
         model.train()
         total, denom = 0.0, 0.0
@@ -141,14 +152,14 @@ class Trainer:
 
             if scaler is not None:
                 with torch.amp.autocast("cuda"):
-                    loss, logs = self._compute_loss(model, batch, loss_fn, meta)
+                    loss, logs = self._compute_loss(model, batch, loss_fn, meta, linear_warmup)
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
                 nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
                 scaler.step(optimizer)
                 scaler.update()
             else:
-                loss, logs = self._compute_loss(model, batch, loss_fn, meta)
+                loss, logs = self._compute_loss(model, batch, loss_fn, meta, linear_warmup)
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
                 optimizer.step()
@@ -160,22 +171,28 @@ class Trainer:
         return total / max(denom, 1.0)
 
     @torch.no_grad()
-    def _evaluate_epoch(self, model, loader, loss_fn, meta) -> float:
+    def _evaluate_epoch(self, model, loader, loss_fn, meta, linear_warmup: bool = False) -> float:
         model.eval()
         total, denom = 0.0, 0.0
 
         for batch in loader:
             batch = self._to_device(batch)
-            _, logs = self._compute_loss(model, batch, loss_fn, meta)
+            _, logs = self._compute_loss(model, batch, loss_fn, meta, linear_warmup)
             weight = batch["obs_mask"].sum().item()
             total += logs["loss"].item() * weight
             denom += weight
 
         return total / max(denom, 1.0)
 
-    def _compute_loss(self, model, batch, loss_fn, meta):
+    def _compute_loss(self, model, batch, loss_fn, meta, linear_warmup: bool = False):
         needs_E = self.config.lambda_elast > 0.0
-        y_hat, _, aux = model(batch, return_parts=True, compute_E=needs_E, meta=meta)
+        y_hat, _, aux = model(
+            batch,
+            return_parts=True,
+            compute_E=needs_E,
+            meta=meta,
+            linear_warmup=linear_warmup,
+        )
         return loss_fn(
             y_hat,
             batch["demands"],
@@ -221,6 +238,21 @@ class Trainer:
             ],
             lr=lr,
         )
+
+    def _zero_and_freeze(self, module: nn.Linear) -> None:
+        with torch.no_grad():
+            module.weight.zero_()
+            if module.bias is not None:
+                module.bias.zero_()
+        for parameter in module.parameters():
+            parameter.requires_grad = False
+            
+    def _zero_and_freeze_splines(self, model: nn.Module) -> None:
+        head = model.head.param_head
+        self._zero_and_freeze(head.head_w)
+        if head.use_cross:
+            self._zero_and_freeze(head.head_w_cross)
+            self._zero_and_freeze(head.head_cross)
 
     def _freeze_splines(self, model: nn.Module, frozen: bool) -> None:
         head = model.head.param_head
