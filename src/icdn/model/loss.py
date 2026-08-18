@@ -15,6 +15,7 @@ class CurvatureCalculator:
         u: torch.Tensor | None,
         Bx: torch.Tensor,
         pairs: torch.Tensor | None,
+        attn_weights: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Kept in float32 for numerical stability under mixed precision.
         w, ddBx = w.float(), ddBx.float()
@@ -28,6 +29,8 @@ class CurvatureCalculator:
 
         i_idx, j_idx = pairs[0], pairs[1]
         contrib = torch.einsum("bpk,bpkl,bpl->bp", ddBx[:, i_idx], u.float(), Bx.float()[:, j_idx])
+        if attn_weights is not None:
+            contrib = contrib * attn_weights.float()
         i_exp = i_idx.unsqueeze(0).expand(B, -1)
         return kappa.scatter_add(1, i_exp, contrib.to(kappa.dtype))
 

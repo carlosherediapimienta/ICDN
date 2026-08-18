@@ -203,6 +203,7 @@ class Trainer:
             aux["Bx"],
             aux["pairs"],
             E=aux.get("E"),
+            attn_weights=aux.get("attn_weights"),
         )
 
     # ── Model preparation ───────────────────────────────────────────────────
