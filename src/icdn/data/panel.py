@@ -73,6 +73,7 @@ class PanelBuilder:
         self.config = config
         self.schema = config.schema
         self.layout: PanelLayout | None = None
+        self._price_fallback_mean: pd.Series | None = None
 
     # ── Fit ─────────────────────────────────────────────────────────────────
 
@@ -100,6 +101,8 @@ class PanelBuilder:
         )
         self._attach_metadata(filtered, layout)
         self.layout = layout
+        price_pivot = self._pivot(filtered, LOG_PRICE, products)
+        self._price_fallback_mean = price_pivot.mean()
         return self
 
     def _select_products(self, df: pd.DataFrame) -> list:
@@ -185,7 +188,8 @@ class PanelBuilder:
         # Prices must exist for every position, so gaps are carried forward and
         # backward inside each store before falling back to the column mean.
         price = price.groupby(level=0, group_keys=False).apply(lambda g: g.ffill().bfill())
-        price = price.fillna(price.mean())
+        fallback = self._price_fallback_mean if self._price_fallback_mean is not None else price.mean()
+        price = price.fillna(fallback)
         price.columns = [f"log_price_{i}" for i in range(n)]
 
         demand = self._pivot(df, LOG_DEMAND, products)

@@ -30,6 +30,11 @@ class FeatureBuilder:
         self.schema = config.schema
         self.shared_features: list[str] = []
         self.product_features: list[str] = []
+        self._period_rank_map: dict | None = None
+        self._max_train_rank: int = 0
+        self._product_first_rank: dict | None = None
+        self._store_product_first_rank: pd.Series | None = None
+
 
     def run(self, panel: pd.DataFrame) -> pd.DataFrame:
         schema = self.schema
@@ -51,6 +56,44 @@ class FeatureBuilder:
         df = self._add_static_attributes(df)
 
         return df
+
+    def fit(self, panel: pd.DataFrame) -> "FeatureBuilder":
+        schema = self.schema
+        schema.validate(panel.columns)
+        store, product, period = schema.store, schema.product, schema.period
+
+        periods = np.sort(panel[period].dropna().unique())
+        self._period_rank_map = {p: i + 1 for i, p in enumerate(periods)}
+        self._max_train_rank = len(periods)
+
+        # Save first-appearance ranks so val lifecycle features count from training start
+        temp = panel[[store, product, period]].copy()
+        temp[PERIOD_RANK] = temp[period].map(self._period_rank_map)
+        self._product_first_rank = temp.groupby(product)[PERIOD_RANK].min().to_dict()
+        self._store_product_first_rank = temp.groupby([store, product])[PERIOD_RANK].min()
+        return self
+
+    def fit_transform(self, panel: pd.DataFrame) -> pd.DataFrame:
+        self.fit(panel)
+        return self.run(panel)
+
+    def transform(self, panel: pd.DataFrame) -> pd.DataFrame:
+        if self._period_rank_map is None:
+            raise RuntimeError("FeatureBuilder.transform called before fit_transform")
+        # Extend the rank map for unseen (val/test) periods, continuing from training
+        unseen = sorted(
+            p for p in panel[self.schema.period].dropna().unique()
+            if p not in self._period_rank_map
+        )
+        extended_map = dict(self._period_rank_map)
+        for i, p in enumerate(unseen):
+            extended_map[p] = self._max_train_rank + i + 1
+        # Swap map for this call only; do not mutate fit state
+        saved = self._period_rank_map
+        self._period_rank_map = extended_map
+        result = self.run(panel)
+        self._period_rank_map = saved
+        return result
 
     # ── Targets ─────────────────────────────────────────────────────────────
 
@@ -74,8 +117,11 @@ class FeatureBuilder:
     # ── Calendar ────────────────────────────────────────────────────────────
 
     def _add_calendar(self, df: pd.DataFrame) -> pd.DataFrame:
-        periods = np.sort(df[self.schema.period].dropna().unique())
-        rank = {p: i + 1 for i, p in enumerate(periods)}
+        if self._period_rank_map is not None:
+            rank = self._period_rank_map
+        else:
+            periods = np.sort(df[self.schema.period].dropna().unique())
+            rank = {p: i + 1 for i, p in enumerate(periods)}
         df[PERIOD_RANK] = df[self.schema.period].map(rank)
         self.shared_features.append(PERIOD_RANK)
 
@@ -87,10 +133,19 @@ class FeatureBuilder:
 
     def _add_lifecycle(self, df: pd.DataFrame) -> pd.DataFrame:
         store, product = self.schema.store, self.schema.product
-        first_product = df.groupby(product)[PERIOD_RANK].transform("min")
-        first_store_product = df.groupby([store, product])[PERIOD_RANK].transform("min")
-        df["periods_seen_product"] = (df[PERIOD_RANK] - first_product).astype(float)
-        df["periods_seen_store_product"] = (df[PERIOD_RANK] - first_store_product).astype(float)
+        if self._product_first_rank is not None:
+            first_product = df[product].map(self._product_first_rank).fillna(df[PERIOD_RANK])
+            sp_first = self._store_product_first_rank.reset_index(name="_first_sp")
+            df = df.merge(sp_first, on=[store, product], how="left")
+            df["_first_sp"] = df["_first_sp"].fillna(df[PERIOD_RANK])
+            df["periods_seen_product"] = (df[PERIOD_RANK] - first_product).astype(float)
+            df["periods_seen_store_product"] = (df[PERIOD_RANK] - df["_first_sp"]).astype(float)
+            df = df.drop(columns=["_first_sp"])
+        else:
+            first_product = df.groupby(product)[PERIOD_RANK].transform("min")
+            first_store_product = df.groupby([store, product])[PERIOD_RANK].transform("min")
+            df["periods_seen_product"] = (df[PERIOD_RANK] - first_product).astype(float)
+            df["periods_seen_store_product"] = (df[PERIOD_RANK] - first_store_product).astype(float)
         self.product_features += ["periods_seen_product", "periods_seen_store_product"]
         return df
 

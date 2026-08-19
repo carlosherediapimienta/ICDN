@@ -53,6 +53,7 @@ class ICDNModel:
         self._panel_builder: PanelBuilder | None = None
         self._device = resolve_device(self.config.device)
         self._train_panel: pd.DataFrame | None = None
+        self._features: FeatureBuilder | None = None
 
     # ── Lifecycle ───────────────────────────────────────────────────────────
 
@@ -73,22 +74,29 @@ class ICDNModel:
         Lags, seasonality and competitive context are engineered internally.
         """
         cfg = self.config
-        features = FeatureBuilder(cfg)
-        long_df = features.run(panel)
 
-        self._panel_builder = PanelBuilder(cfg)
-        wide = self._panel_builder.fit_transform(
-            long_df, features.shared_features, features.product_features
-        )
-        self.layout = self._panel_builder.layout
-
+        # Split the panel RAW
         splitter = TemporalSplitter(period_col=cfg.schema.period)
-        train_wide, val_wide = splitter.single_split(wide, train_frac=1.0 - cfg.validation_fraction)
-        if val_wide.empty:
+        train_raw, val_raw = splitter.single_split(panel, train_frac=1.0 - cfg.validation_fraction)
+        if val_raw.empty:
             raise ValueError(
                 "the panel does not have enough periods to build a validation split. "
                 "Provide more history or lower validation_fraction."
             )
+        
+        # Build the features
+        features = FeatureBuilder(cfg)
+        train_long = features.fit_transform(train_raw)
+        val_long   = features.transform(val_raw)
+        self._features = features
+    
+        # PanelBuilder only ajusted with the train panel
+        self._panel_builder = PanelBuilder(cfg)
+        train_wide = self._panel_builder.fit_transform(
+            train_long, features.shared_features, features.product_features
+        )
+        val_wide = self._panel_builder.transform(val_long)
+        self.layout = self._panel_builder.layout
 
         seed_everything(cfg.seed)
         self._model = self._build_model(train_wide)
@@ -298,8 +306,11 @@ class ICDNModel:
                 "(it is not stored inside checkpoints). Pass the data explicitly."
             )
 
-        features = FeatureBuilder(cfg)
-        wide = self._panel_builder.transform(features.run(panel))
+        if self._features is not None:
+            wide = self._panel_builder.transform(self._features.transform(panel))
+        else:
+            # Fallback for models loaded from checkpoint (no FeatureBuilder state)
+            wide = self._panel_builder.transform(FeatureBuilder(cfg).run(panel))
         dataset = MultiProductDataset(wide, self.layout, period_col=cfg.schema.period)
         factory = DataLoaderFactory(
             batch_size=cfg.batch_size,
