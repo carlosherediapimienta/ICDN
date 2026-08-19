@@ -248,13 +248,20 @@ class Trainer:
         ).to(self.device)
 
     def _build_optimizer(self, model: nn.Module, lr: float) -> torch.optim.Optimizer:
-        # Spline, cross-price and bias parameters are left undecayed: shrinking
-        # them toward zero would flatten the very curvature we want to learn.
+        # Output heads that emit intercept, price slope, splines or cross
+        # terms are left undecayed: shrinking them toward zero flattens the
+        # demand surface. Encoder weights still decay.
         decayed, undecayed = [], []
         for name, param in model.named_parameters():
             if not param.requires_grad:
                 continue
-            if name.endswith("bias") or "head_w" in name or "cross" in name or "spline" in name:
+            if (
+                name.endswith("bias")
+                or "head_b" in name
+                or "head_w" in name
+                or "cross" in name
+                or "spline" in name
+            ):
                 undecayed.append(param)
             else:
                 decayed.append(param)
