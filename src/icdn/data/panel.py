@@ -195,6 +195,12 @@ class PanelBuilder:
         price = price.groupby(level=0, group_keys=False).apply(lambda g: g.ffill().bfill())
         fallback = self._price_fallback_mean if self._price_fallback_mean is not None else price.mean()
         price = price.fillna(fallback)
+        if price.isna().any().any():
+            missing = price.columns[price.isna().all()].tolist()
+            raise ValueError(
+                f"no finite fallback price for products {missing}. "
+                "Fit the model on data that includes them, or pass those products in the panel."
+            )
         price.columns = [f"log_price_{i}" for i in range(n)]
 
         demand = self._pivot(df, LOG_DEMAND, products)
