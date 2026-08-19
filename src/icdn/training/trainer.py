@@ -2,6 +2,8 @@
 
 import copy
 import math
+import random 
+import numpy as np
 
 import torch
 import torch.nn as nn
@@ -36,7 +38,7 @@ class Trainer:
         meta: ProductMetadata | None = None,
     ) -> dict:
         cfg = self.config
-        torch.manual_seed(cfg.seed)
+        seed_everything(cfg.seed)
         model.to(self.device)
         if meta is not None:
             meta = meta.to(self.device)
@@ -303,6 +305,13 @@ def resolve_device(device: str) -> torch.device:
     if device == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(device)
+
+def seed_everything(seed: int) -> None: 
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def _inv_softplus(x: float) -> float:

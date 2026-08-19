@@ -131,15 +131,19 @@ class ElasticityLoss(nn.Module):
             bounds_high[diag, diag] = self.r_own
             rho[diag, diag] = self.rho_own_low
 
-            # Entries outside the sparse graph stay at zero in E, so they never
-            # contribute to the penalty regardless of the mask.
+            # Normalize over observed diagonal and active edges.
             m = obs_mask.float()
             M = m.unsqueeze(2) * m.unsqueeze(1)
+            
+            active = torch.eye(n, device=E.device, dtype=E.dtype)
+            if pairs is not None and pairs.numel() > 0:
+                active[pairs[0], pairs[1]] = 1.0
+            active_mask = M * active.unsqueeze(0)
 
             upper_viol = F.relu(E - bounds_high.unsqueeze(0)) ** 2
             lower_viol = F.relu(bounds_low.unsqueeze(0) - E) ** 2
-            penalty = M * (upper_viol + rho.unsqueeze(0) * lower_viol)
-            loss_elast = penalty.sum() / M.sum().clamp(min=1.0)
+            penalty = active_mask * (upper_viol + rho.unsqueeze(0) * lower_viol)
+            loss_elast = penalty.sum() / active_mask.sum().clamp(min=1.0)
         else:
             loss_elast = y_hat.new_tensor(0.0)
 

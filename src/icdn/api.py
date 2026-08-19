@@ -23,7 +23,7 @@ from .training.metrics import (
     predict_elasticities,
     regression_metrics,
 )
-from .training.trainer import Trainer, resolve_device
+from .training.trainer import Trainer, resolve_device, seed_everything
 
 # Highest log-demand that still converts to a finite level.
 _MAX_LOG_DEMAND = 700.0
@@ -90,6 +90,7 @@ class ICDNModel:
                 "Provide more history or lower validation_fraction."
             )
 
+        seed_everything(cfg.seed)
         self._model = self._build_model(train_wide)
         loaders = self._build_loaders(train_wide, val_wide)
 
