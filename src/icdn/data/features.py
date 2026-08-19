@@ -151,25 +151,63 @@ class FeatureBuilder:
 
     # ── History ─────────────────────────────────────────────────────────────
 
+    def _week_grid(self, df: pd.DataFrame) -> list:
+        """ Contiguous week index from the earliest period in play"""
+        period = self.schema.period
+        values = set(df[period].dropna().unique())
+        if self._period_rank_map is not None:
+            values |= set(self._period_rank_map)
+        start, end = min(values), max(values)
+        if not isinstance(start, (int, np.integer)) or not isinstance(end, (int, np.integer)):
+            raise TypeError(
+                f"{period} must be an integer week index to build gap-aware lags."
+                "Map dates to a sequential week_id before fitting."
+            )
+        return list(range(int(start), int(end) + 1))
+    
+    def _join_calendar_feature(
+        self,
+        df: pd.DataFrame,
+        grid: pd.DataFrame,
+        col: str,
+        miss: str,
+    ) -> pd.DataFrame:
+        store, product, period = self.schema.store, self.schema.product, self.schema.period
+        stacked = (
+            grid.stack(future_stack=True)
+            .rename(col)
+            .rename_axis([store, product, period])
+            .reset_index(drop=False)
+        )
+        df = df.merge(stacked, on=[store, product, period], how="left")
+        df[miss] = (~np.isfinite(df[col])).astype(float)
+        df[col] = df[col].fillna(0.0)
+        self.product_features += [col, miss]
+        return df
+
     def _add_lags_and_rollings(self, df: pd.DataFrame) -> pd.DataFrame:
-        grouped = df.groupby([self.schema.store, self.schema.product])[LOG_DEMAND]
+        store, product, period = self.schema.store, self.schema.product, self.schema.period
+        grid = self._week_grid(df)
+
+        demand = (
+            df.pivot_table(
+                index=[store, product],
+                columns=period,
+                values=LOG_DEMAND,
+                aggfunc="mean",
+            )
+        .reindex(columns=grid)
+        )
 
         for k in self.config.lags:
             col, miss = f"lag_{k}", f"miss_lag_{k}"
-            values = grouped.shift(k)
-            df[miss] = (~np.isfinite(values)).astype(float)
-            df[col] = values.fillna(0.0)
-            self.product_features += [col, miss]
+            df = self._join_calendar_feature(df, demand.shift(k, axis=1), col, miss)
 
         for window in self.config.rolling_windows:
             col, miss = f"roll_{window}", f"miss_roll_{window}"
-            # shift(1) keeps the window strictly historical.
-            values = grouped.transform(
-                lambda s, w=window: s.shift(1).rolling(w, min_periods=1).mean()
-            )
-            df[miss] = (~np.isfinite(values)).astype(float)
-            df[col] = values.fillna(0.0)
-            self.product_features += [col, miss]
+            # shift(1) keeps the window strictly historical; rolling is over weeks, no rows.
+            rolled = demand.shift(1, axis=1).rolling(window, min_periods=1, axis=1).mean()
+            df = self._join_calendar_feature(df, rolled, col, miss)
 
         return df
 
