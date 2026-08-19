@@ -248,6 +248,7 @@ class ICDNModel:
             dropout=cfg.dropout,
             enforce_negative_beta=True,
             use_cross=cfg.use_cross,
+            same_category_first=cfg.same_category_first,
         )
         return ICDN(context_builder=tokens, price_splines=splines, head=head, n=n)
 

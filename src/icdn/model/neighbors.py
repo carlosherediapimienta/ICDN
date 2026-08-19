@@ -76,7 +76,7 @@ class SparseNeighborSelector(nn.Module):
         init_style_bonus: float = 0.10,
         init_size_bonus: float = 0.10,
         size_gamma: float = 1.0,
-        same_category_first: bool = True,
+        same_category_first: bool = False,
     ):
         super().__init__()
         self.q_proj = nn.Linear(d_hidden, d_attn, bias=False)

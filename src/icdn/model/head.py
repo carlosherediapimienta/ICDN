@@ -119,6 +119,7 @@ class IntegrableDemandHead(nn.Module):
         dropout: float = 0.0,
         enforce_negative_beta: bool = False,
         use_cross: bool = True,
+        same_category_first: bool = False,
     ):
         super().__init__()
         self.encoder = SharedProductEncoder(context_dim, hidden=hidden, act=act, dropout=dropout)
@@ -133,7 +134,7 @@ class IntegrableDemandHead(nn.Module):
         )
         self.demand_calc = DemandCalculator()
         self.neighbor_selector = (
-            SparseNeighborSelector(d_hidden=hidden_dim, k_neighbors=k_neighbors)
+            SparseNeighborSelector(d_hidden=hidden_dim, k_neighbors=k_neighbors, same_category_first=same_category_first)
             if use_cross
             else None
         )

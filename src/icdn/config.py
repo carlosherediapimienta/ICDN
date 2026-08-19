@@ -91,6 +91,7 @@ class ICDNConfig:
     d_brand: int = 8
     d_style: int = 8
     use_cross: bool = True
+    same_category_first: bool = False
 
     # ── Objective ───────────────────────────────────────────────────────────
     huber_delta: float = 1.0

@@ -34,6 +34,7 @@ d_store: 16
 d_brand: 8
 d_style: 8
 use_cross: true
+same_category_first: false
 
 # Objective
 huber_delta: 1.0
