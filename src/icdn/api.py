@@ -339,11 +339,16 @@ class ICDNModel:
         """Replaces demand by a trailing moving average for the warm-up phase."""
         cfg = self.config
         smoothed = wide.copy()
-        columns = [f"log_demand_{i}" for i in range(self.layout.n_products)]
-        grouped = smoothed.groupby(cfg.schema.store, observed=True)[columns]
-        smoothed[columns] = grouped.transform(
-            lambda s: s.rolling(cfg.smoothing_window, min_periods=1).mean()
-        )
+        store = cfg.schema.store
+        for i in range(self.layout.n_products):
+            demand_col = f"log_demand_{i}"
+            mask_col = f"obs_mask_{i}"
+            observed = smoothed[demand_col].where(smoothed[mask_col] > 0)
+            smoothed[demand_col] = (
+                observed.groupby(smoothed[store], observed=True)
+                .transform(lambda s: s.rolling(cfg.smoothing_window, min_periods=1).mean())
+                .fillna(0.0)
+            )
         return smoothed
 
     def _prepare(self, panel: pd.DataFrame | None):
