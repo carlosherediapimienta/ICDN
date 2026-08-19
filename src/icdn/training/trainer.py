@@ -318,7 +318,15 @@ class Trainer:
             return
 
         model.eval()
-        latents = (model.encode(self._to_device(batch)) for batch in loader)
+        graph_loader = DataLoader(
+            loader.dataset,
+            batch_size=loader.batch_size,
+            shuffle=False,
+            drop_last=False,
+            num_workers=loader.num_workers,
+            pin_memory=loader.pin_memory,
+        )
+        latents = (model.encode(self._to_device(batch)) for batch in graph_loader)
         mean_scores = selector.accumulate_mean_scores(latents, meta=meta)
         selector.freeze_graph(mean_scores, meta=meta)
 

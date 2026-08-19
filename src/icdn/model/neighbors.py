@@ -135,7 +135,7 @@ class SparseNeighborSelector(nn.Module):
 
     @torch.no_grad()
     def accumulate_mean_scores(self, h_iter, meta: ProductMetadata | None = None) -> torch.Tensor:
-        """Averages the (n, n) score matrix over every batch yielded by ``h_iter``.
+        """Averages the (n, n) score matrix over every observation yielded by ``h_iter``.
 
         The caller is responsible for producing the latent vectors in eval mode
         and without gradients. The result feeds ``freeze_graph``.
@@ -147,14 +147,15 @@ class SparseNeighborSelector(nn.Module):
         for h in h_iter:
             h = h.to(device)
             n = h.shape[1]
+            batch_size = h.shape[0]
             not_self, _, bonus = self._meta_bonus(meta, n, device)
             Q, K = self.q_proj(h), self.k_proj(h)
             scores = torch.bmm(Q, K.transpose(1, 2)) / self.scale
             scores = scores + bonus.unsqueeze(0)
             scores = scores.masked_fill(~not_self.unsqueeze(0), float("-inf"))
-            batch_mean = scores.mean(dim=0)
-            acc = batch_mean if acc is None else acc + batch_mean
-            count += 1
+            batch_sum = scores.sum(dim=0)
+            acc = batch_sum if acc is None else acc + batch_sum
+            count += batch_size
 
         if acc is None or count == 0:
             raise RuntimeError("accumulate_mean_scores received an empty iterator")
