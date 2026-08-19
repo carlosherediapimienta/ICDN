@@ -144,10 +144,15 @@ class PanelBuilder:
         kept = set(coverage[coverage >= self.config.min_coverage].index)
         df = df[df[product].isin(kept)].copy()
 
-        min_products = self.config.min_products or len(kept)
-        counts = df.groupby([store, period])[product].nunique()
-        dense = counts[counts >= min_products].index
-        return df.set_index([store, period]).loc[lambda d: d.index.isin(dense)].reset_index()
+        if self.config.min_products is not None:
+            counts = df.groupby([store, period])[product].nunique()
+            dense = counts[counts >= self.config.min_products].index
+            df = (
+                df.set_index([store, period])
+                .loc[lambda d: d.index.isin(dense)]
+                .reset_index()
+            )
+        return df
 
     def _attach_metadata(self, df: pd.DataFrame, layout: PanelLayout) -> None:
         """Freezes the static attributes of each product position."""
