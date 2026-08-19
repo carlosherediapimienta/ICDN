@@ -176,7 +176,7 @@ class Trainer:
                 for name, param in model.named_parameters():
                     self._require_finite(param, name)
 
-            weight = batch["obs_mask"].sum().item()
+            weight = (batch["obs_mask"].sum(dim=1) > 0).sum().item()
             total += logs["loss"].item() * weight
             denom += weight
 
@@ -190,7 +190,7 @@ class Trainer:
         for batch in loader:
             batch = self._to_device(batch)
             _, logs = self._compute_loss(model, batch, loss_fn, meta, linear_warmup)
-            weight = batch["obs_mask"].sum().item()
+            weight = (batch["obs_mask"].sum(dim=1) > 0).sum().item()
             total += logs["loss"].item() * weight
             denom += weight
 

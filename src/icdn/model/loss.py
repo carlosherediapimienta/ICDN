@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# ----- Classes
 
 class CurvatureCalculator:
     """Second derivative of log-demand with respect to its own log-price."""
@@ -52,21 +53,11 @@ class SmoothnessPenalty:
         u: torch.Tensor,
         Bx: torch.Tensor,
         pairs: torch.Tensor,
+        obs_mask: torch.Tensor,
         attn_weights: torch.Tensor | None = None,
     ) -> torch.Tensor:
         kappa = self.curvature_calc.run(w, ddBx, u, Bx, pairs, attn_weights)
-        return (kappa**2).mean()
-
-
-class PositivityPenalty:
-    """Soft penalty on positive own-price elasticities (Giffen behaviour)."""
-
-    def run(self, eps_hat: torch.Tensor, obs_mask: torch.Tensor | None = None) -> torch.Tensor:
-        penalty = F.relu(eps_hat)
-        if obs_mask is not None:
-            return (penalty * obs_mask).sum() / obs_mask.sum().clamp(min=1.0)
-        return penalty.mean()
-
+        return _mean_per_observation(kappa**2, obs_mask)
 
 class ElasticityLoss(nn.Module):
     """Compound objective ``L_fit + lambda_smooth * L_smooth + lambda_elast * L_elast``.
@@ -87,10 +78,9 @@ class ElasticityLoss(nn.Module):
         l_cross: float = -1.0,
         r_cross: float = 1.0,
         rho_own_low: float = 1.0,
-        reduction: str = "mean",
     ):
         super().__init__()
-        self.fit_loss = nn.HuberLoss(delta=float(huber_delta), reduction=reduction)
+        self.fit_loss = nn.HuberLoss(delta=float(huber_delta), reduction="none")
         self.smoothness_penalty = SmoothnessPenalty()
         self.lambda_smooth = float(lambda_smooth)
         self.lambda_elast = float(lambda_elast)
@@ -111,11 +101,14 @@ class ElasticityLoss(nn.Module):
         E: torch.Tensor | None = None,
         attn_weights: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        mask = obs_mask.bool()
-        loss_fit = self.fit_loss(y_hat[mask], y_true[mask]) if mask.any() else y_hat.new_tensor(0.0)
+
+        huber = self.fit_loss(y_hat, y_true)
+        loss_fit = _mean_per_observation(huber, obs_mask)
 
         if self.lambda_smooth > 0.0:
-            loss_smooth = self.smoothness_penalty.run(w, ddBx, u, Bx, pairs, attn_weights)
+            loss_smooth = self.smoothness_penalty.run(
+                w, ddBx, u, Bx, pairs, obs_mask, attn_weights
+            )
         else:
             loss_smooth = y_hat.new_tensor(0.0)
 
@@ -142,8 +135,8 @@ class ElasticityLoss(nn.Module):
 
             upper_viol = F.relu(E - bounds_high.unsqueeze(0)) ** 2
             lower_viol = F.relu(bounds_low.unsqueeze(0) - E) ** 2
-            penalty = active_mask * (upper_viol + rho.unsqueeze(0) * lower_viol)
-            loss_elast = penalty.sum() / active_mask.sum().clamp(min=1.0)
+            penalty = upper_viol + rho.unsqueeze(0) * lower_viol
+            loss_elast = _mean_per_observation(penalty, active_mask)
         else:
             loss_elast = y_hat.new_tensor(0.0)
 
@@ -163,3 +156,20 @@ class ElasticityLoss(nn.Module):
 
     def forward(self, *args, **kwargs):
         return self.run(*args, **kwargs)
+
+# --- Functions 
+
+def _mean_per_observation(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Mean within each store-week, then across store-weeks with support.
+
+    ``values`` and ``mask`` share shape ``(B,...)``. Store-weeks whose mask
+    sums to zero are dropped so they do not contribute a dummy 0.
+    """
+    m = mask.float()
+    dims = tuple(range(1, values.ndim))
+    count = m.sum(dim=dims)
+    per_obs = (values * m).sum(dim=dims) / count.clamp(min=1.0)
+    valid = count > 0
+    if not valid.any():
+        return values.new_tensor(0.0)
+    return per_obs[valid].mean()
