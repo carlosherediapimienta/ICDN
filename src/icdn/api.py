@@ -169,7 +169,9 @@ class ICDNModel:
         Args:
             panel: data to evaluate. Defaults to the training panel.
             aggregate: when True, summarises each store and product pair with
-                its mean, dispersion and a 95% interval across periods. When
+                its mean, standard deviation and 2.5/97.5 temporal percentiles
+                across periods. These are not statistical confidence intervals:
+                they do not retrain, bootstrap or average over seeds. When
                 False, returns one row per observation.
         """
         wide, loader = self._prepare(panel)
@@ -185,8 +187,8 @@ class ICDNModel:
         summary = grouped["elasticity"].agg(
             elasticity="mean",
             std="std",
-            ci_low=lambda s: s.quantile(0.025),
-            ci_high=lambda s: s.quantile(0.975),
+            temporal_q025=lambda s: s.quantile(0.025),
+            temporal_q975=lambda s: s.quantile(0.975),
             n_obs="size",
         )
         return summary.reset_index()

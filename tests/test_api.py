@@ -29,7 +29,7 @@ def test_elasticities_cover_own_and_cross_effects(panel, config):
     assert set(elasticities["kind"]) == {"own", "cross"}
     own = elasticities[elasticities["kind"] == "own"]
     assert (own["product"] == own["competitor"]).all()
-    assert {"ci_low", "ci_high", "n_obs"} <= set(elasticities.columns)
+    assert {"temporal_q025", "temporal_q975", "n_obs"} <= set(elasticities.columns)
 
 
 def test_raw_elasticities_keep_one_row_per_observation(panel, config):

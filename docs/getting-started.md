@@ -104,9 +104,7 @@ the price of `competitor`:
   is imposed.
 
 Aggregated output summarises each store and product pair across periods with
-its mean, standard deviation and a 95% interval. Pass `aggregate=False` for one
-row per observation, which is what you want when studying how elasticity moves
-with promotions or seasonality.
+its mean, standard deviation and percentiles 2.5/97.5 across periods (not a confidence interval). Pass `aggregate=False` for one row per observation, which is what you want when studying how elasticity moves with promotions or seasonality.
 
 ## 6. Saving and serving
 
