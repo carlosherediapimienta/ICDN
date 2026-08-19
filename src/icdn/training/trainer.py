@@ -159,7 +159,9 @@ class Trainer:
                 scaler.unscale_(optimizer)
                 grad_norm = nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
                 if not torch.isfinite(grad_norm):
-                    raise FloatingPointError(f"non-finite gradient norm: {float(grad_norm)}")
+                    optimizer.zero_grad(set_to_none=True)
+                    scaler.update()
+                    continue
                 scaler.step(optimizer)
                 scaler.update()
                 for name, param in model.named_parameters():
