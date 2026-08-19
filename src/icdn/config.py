@@ -124,6 +124,39 @@ class ICDNConfig:
         for name in ("own_elasticity_bounds", "cross_elasticity_bounds"):
             setattr(self, name, tuple(getattr(self, name)))
 
+        if self.k_neighbors < 0:
+            raise ValueError("k_neighbors must be >= 0")
+        if not 0.0 < self.validation_fraction < 1.0:
+            raise ValueError("validation_fraction must be in (0, 1)")
+        if not 0.0 <= self.dropout < 1.0:
+            raise ValueError("dropout must be in [0, 1)")
+        if self.batch_size < 1:
+            raise ValueError("batch_size must be >= 1")
+        if self.epochs < 1:
+            raise ValueError("epochs must be >= 1")
+        if self.warmup_epochs < 0:
+            raise ValueError("warmup_epochs must be >= 0")
+        if self.n_knots < 1:
+            raise ValueError("n_knots must be >= 1")
+        if not self.lags:
+            raise ValueError("lags must be a non-empty tuple of positive integers")
+        if any(k < 1 for k in self.lags):
+            raise ValueError("every lag must be >= 1")
+        if not self.rolling_windows:
+            raise ValueError("rolling_windows must be a non-empty tuple of positive integers")
+        if any(w < 1 for w in self.rolling_windows):
+            raise ValueError("every rolling window must be >= 1")
+        lo, hi = self.own_elasticity_bounds
+        if lo >= hi:
+            raise ValueError(f"own_elasticity_bounds are inverted: {lo} >= {hi}")
+        lo, hi = self.cross_elasticity_bounds
+        if lo >= hi:
+            raise ValueError(f"cross_elasticity_bounds are inverted: {lo} >= {hi}")
+        if self.min_coverage < 0.0 or self.min_coverage > 1.0:
+            raise ValueError("min_coverage must be in [0, 1]")
+        if self.min_products is not None and self.min_products < 1:
+            raise ValueError("min_products must be >= 1 when set")
+
     @classmethod
     def from_yaml(cls, path: str | Path) -> "ICDNConfig":
         import yaml

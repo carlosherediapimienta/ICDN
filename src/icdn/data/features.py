@@ -35,10 +35,38 @@ class FeatureBuilder:
         self._product_first_rank: dict | None = None
         self._store_product_first_rank: pd.Series | None = None
 
+    def _validate_panel(self, df: pd.DataFrame) -> None:
+        schema = self.schema
+        schema.validate(df.columns)
+        store, product, period = schema.store, schema.product, schema.period
+        keys = [store, product, period]
+        duplicated = df.duplicated(keys, keep=False)
+        if duplicated.any():
+            n = int(duplicated.sum())
+            raise ValueError(
+                f"{n} duplicate (store, product, period) rows. "
+                "Aggregate units (sum) and prices (e.g. quantity-weighted) "
+                "before calling fit(); a silent mean after log() is not valid."
+            )
+
+        price = pd.to_numeric(df[schema.price], errors="coerce")
+        units = pd.to_numeric(df[schema.units], errors="coerce")
+        if not np.isfinite(price).all() or not np.isfinite(units).all():
+            raise ValueError("price and units must be finite")
+        if (price <= 0).any() or (units < 0).any():
+            raise ValueError(
+                "price must be strictly positive and units non-negative. "
+                "Pass levels, not logs."
+            )
+
+        if schema.size is not None and schema.size in df.columns:
+            size = pd.to_numeric(df[schema.size], errors="coerce")
+            if (size < 0).any():
+                raise ValueError(f"{schema.size} must be non-negative")
 
     def run(self, panel: pd.DataFrame) -> pd.DataFrame:
+        self._validate_panel(panel)
         schema = self.schema
-        schema.validate(panel.columns)
 
         df = panel.copy()
         store, product, period = schema.store, schema.product, schema.period
@@ -58,8 +86,8 @@ class FeatureBuilder:
         return df
 
     def fit(self, panel: pd.DataFrame) -> "FeatureBuilder":
+        self._validate_panel(panel)
         schema = self.schema
-        schema.validate(panel.columns)
         store, product, period = schema.store, schema.product, schema.period
 
         periods = np.sort(panel[period].dropna().unique())
