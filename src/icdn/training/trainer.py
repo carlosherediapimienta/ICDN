@@ -157,14 +157,22 @@ class Trainer:
                     loss, logs = self._compute_loss(model, batch, loss_fn, meta, linear_warmup)
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
-                nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+                grad_norm = nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+                if not torch.isfinite(grad_norm):
+                    raise FloatingPointError(f"non-finite gradient norm: {float(grad_norm)}")
                 scaler.step(optimizer)
                 scaler.update()
+                for name, param in model.named_parameters():
+                    self._require_finite(param, name)
             else:
                 loss, logs = self._compute_loss(model, batch, loss_fn, meta, linear_warmup)
                 loss.backward()
-                nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+                grad_norm = nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+                if not torch.isfinite(grad_norm):
+                    raise FloatingPointError(f"non-finite gradient norm: {float(grad_norm)}")
                 optimizer.step()
+                for name, param in model.named_parameters():
+                    self._require_finite(param, name)
 
             weight = batch["obs_mask"].sum().item()
             total += logs["loss"].item() * weight
@@ -195,7 +203,18 @@ class Trainer:
             meta=meta,
             linear_warmup=linear_warmup,
         )
-        return loss_fn(
+
+        # Check for non-finite values in the loss components.
+        self._require_finite(y_hat, "y_hat")
+        self._require_finite(aux["beta"], "beta")
+        self._require_finite(aux["w"], "w")
+        self._require_finite(aux["w_cross"], "w_cross")
+        self._require_finite(aux["u"], "u")
+        self._require_finite(aux["Bx"], "Bx")
+        self._require_finite(aux["dBx"], "dBx")
+        self._require_finite(aux["ddBx"], "ddBx")
+
+        loss, logs = loss_fn(
             y_hat,
             batch["demands"],
             batch["obs_mask"],
@@ -207,6 +226,10 @@ class Trainer:
             E=aux.get("E"),
             attn_weights=aux.get("attn_weights"),
         )
+        if not torch.isfinite(loss):
+            raise FloatingPointError(f"non-finite loss: {loss}")
+
+        return loss, logs
 
     # ── Model preparation ───────────────────────────────────────────────────
 
@@ -296,6 +319,12 @@ class Trainer:
         latents = (model.encode(self._to_device(batch)) for batch in loader)
         mean_scores = selector.accumulate_mean_scores(latents, meta=meta)
         selector.freeze_graph(mean_scores, meta=meta)
+
+    def _require_finite(self, tensor: torch.Tensor | None, name: str) -> None:
+        if tensor is None or tensor.numel() == 0:
+            return
+        if not torch.isfinite(tensor).all():
+            raise FloatingPointError(f"non-finite values in {name}")
 
     def _to_device(self, batch: dict) -> dict:
         return {k: v.to(self.device, non_blocking=True) for k, v in batch.items()}
