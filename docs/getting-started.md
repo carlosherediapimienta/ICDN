@@ -15,9 +15,6 @@ ICDN consumes a **long panel**: one row per store, product and period.
 | Units | `units` | Non-negative sales volume. |
 | Promotion | `on_promo` | Binary flag. |
 
-If your price and units are already logged, set
-`PanelSchema(values_are_log=True)` and no transformation is applied.
-
 ### Optional columns
 
 These improve how competitors are chosen. Omit any of them and the model falls

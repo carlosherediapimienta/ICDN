@@ -17,14 +17,13 @@ class PanelSchema:
         store: store or point-of-sale identifier.
         product: product identifier.
         period: period identifier, expected to be sortable (e.g. a week index).
-        price: unit price. Set ``values_are_log`` when it is already logged.
-        units: units sold, on the same basis as the price.
+        price: unit price in levels (strictly positive). Logged internally.
+        units: units sold (non-negative). Transformed with log1p internally.
         promo: binary promotional flag.
         category: products only compete inside the same category.
         brand: brand identifier, biases competitor selection.
         style: sub-segment identifier, biases competitor selection.
         size: pack size, biases competitor selection toward similar formats.
-        values_are_log: True when price and units are already in log space.
     """
 
     store: str = "store_code"
@@ -37,7 +36,6 @@ class PanelSchema:
     brand: str | None = None
     style: str | None = None
     size: str | None = None
-    values_are_log: bool = False
 
     @property
     def required(self) -> list[str]:

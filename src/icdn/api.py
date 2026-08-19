@@ -439,10 +439,7 @@ class ICDNModel:
         return pd.concat(frames, ignore_index=True)
 
     def _to_levels(self, log_values: pd.Series) -> pd.Series:
-        if self.config.schema.values_are_log:
-            return log_values
-        # Clipping keeps the column finite and non-negative even when an
-        # undertrained model emits extreme values.
+        # Inverse of log1p. Clip so an undertrained model cannot emit inf.
         levels = np.expm1(log_values.astype("float64").clip(upper=_MAX_LOG_DEMAND))
         return levels.clip(lower=0.0)
 

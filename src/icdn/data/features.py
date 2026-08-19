@@ -99,19 +99,15 @@ class FeatureBuilder:
 
     def _add_targets(self, df: pd.DataFrame) -> pd.DataFrame:
         schema = self.schema
-        if schema.values_are_log:
-            df[LOG_PRICE] = df[schema.price].astype(float)
-            df[LOG_DEMAND] = df[schema.units].astype(float)
-        else:
-            price = pd.to_numeric(df[schema.price], errors="coerce")
-            units = pd.to_numeric(df[schema.units], errors="coerce")
-            if (price <= 0).any() or (units < 0).any():
-                raise ValueError(
-                    "price must be strictly positive and units non-negative. "
-                    "Set PanelSchema(values_are_log=True) if they are already logged."
-                )
-            df[LOG_PRICE] = np.log(price)
-            df[LOG_DEMAND] = np.log1p(units)
+        price = pd.to_numeric(df[schema.price], errors="coerce")
+        units = pd.to_numeric(df[schema.units], errors="coerce")
+        if (price <= 0).any() or (units < 0).any():
+            raise ValueError(
+                "price must be strictly positive and units non-negative."
+                "Pass levels, not logs: price p > 0 and units ≥ 0."
+            )
+        df[LOG_PRICE] = np.log(price)
+        df[LOG_DEMAND] = np.log1p(units)
         return df
 
     # ── Calendar ────────────────────────────────────────────────────────────
