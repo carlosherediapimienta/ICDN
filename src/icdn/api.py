@@ -54,6 +54,7 @@ class ICDNModel:
         self._device = resolve_device(self.config.device)
         self._train_panel: pd.DataFrame | None = None
         self._features: FeatureBuilder | None = None
+        self._train_tail: pd.DataFrame | None = None
 
     # ── Lifecycle ───────────────────────────────────────────────────────────
 
@@ -83,6 +84,16 @@ class ICDNModel:
                 "the panel does not have enough periods to build a validation split. "
                 "Provide more history or lower validation_fraction."
             )
+
+        # Save enough history so lag/rolling features are correct at inference time
+        n_tail = max(list(cfg.lags) + list(cfg.rolling_windows))
+        _store, _product, _period = cfg.schema.store, cfg.schema.product, cfg.schema.period
+        self._train_tail = (
+            train_raw
+            .sort_values([_store, _product, _period])
+            .groupby([_store, _product], group_keys=False)
+            .tail(n_tail)
+        )
         
         # Build the features
         features = FeatureBuilder(cfg)
@@ -119,6 +130,11 @@ class ICDNModel:
     def predict(self, panel: pd.DataFrame | None = None) -> pd.DataFrame:
         """Predicts demand for every store, period and product.
 
+        Competitive features (neighbour counts, promo intensity, assortment size)
+        are computed from the rows present in ``panel``. Pass every product of
+        interest for each store-period; a partial panel yields different
+        predictions for the same observation.
+        
         Returns a long frame with the identifier columns of your schema plus
         ``predicted_demand``, ``predicted_log_demand`` and, where available,
         the observed demand.
@@ -146,6 +162,10 @@ class ICDNModel:
         Each row reports how the demand of ``product`` responds to the price of
         ``competitor``. Rows where both coincide are own-price elasticities.
 
+        Competitive features are computed from the rows present in ``panel``.
+        Pass every product of interest for each store-period; a partial panel
+        yields different elasticities for the same observation.
+
         Args:
             panel: data to evaluate. Defaults to the training panel.
             aggregate: when True, summarises each store and product pair with
@@ -172,7 +192,13 @@ class ICDNModel:
         return summary.reset_index()
 
     def evaluate(self, panel: pd.DataFrame | None = None) -> dict[str, float]:
-        """Masked MAE, RMSE and R2 of log-demand on the given panel."""
+        """Masked MAE, RMSE and R2 of log-demand on the given panel.
+
+        Competitive features are computed from the rows present in ``panel``.
+        Pass every product of interest for each store-period; a partial panel
+        yields different predictions, and therefore different metrics, for
+        the same observation.
+        """
         _, loader = self._prepare(panel)
         y_hat = predict_demand(self._model, loader, self._device, self.product_metadata())
         y_true, mask = collect_targets(loader)
@@ -183,7 +209,18 @@ class ICDNModel:
     def save(self, path: str | Path) -> Path:
         """Writes weights, configuration, layout and encoders to a single file."""
         self._require_fitted()
-        return save_checkpoint(path, self._model, self.config, self.layout)
+        extra = {}
+        if self._features is not None:
+            extra["period_rank_map"] = self._features._period_rank_map
+            extra["max_train_rank"]  = self._features._max_train_rank
+            extra["product_first_rank"] = self._features._product_first_rank
+            extra["store_product_first_rank"] = self._features._store_product_first_rank
+        if self._panel_builder is not None and self._panel_builder._price_fallback_mean is not None:
+            extra["price_fallback_mean"] = self._panel_builder._price_fallback_mean
+        if self._train_tail is not None:
+            extra["train_tail"] = self._train_tail
+        return save_checkpoint(path, self._model, self.config, self.layout, extra)
+
 
     @classmethod
     def load(cls, path: str | Path) -> "ICDNModel":
@@ -201,6 +238,19 @@ class ICDNModel:
             selector.set_frozen_graph(payload["frozen_pairs"], payload["frozen_edge_bonus"])
         network.load_state_dict(payload["state_dict"])
         model._model = network.to(model._device)
+
+        if payload.get("period_rank_map") is not None:
+            fb = FeatureBuilder(model.config)
+            fb._period_rank_map = payload["period_rank_map"]
+            fb._max_train_rank = payload["max_train_rank"]
+            fb._product_first_rank = payload["product_first_rank"]
+            fb._store_product_first_rank = payload["store_product_first_rank"]
+            model._features = fb
+        if payload.get("price_fallback_mean") is not None:
+            model._panel_builder._price_fallback_mean = payload["price_fallback_mean"]
+        if payload.get("train_tail") is not None:
+            model._train_tail = payload["train_tail"]
+
         return model
 
     # ── Internals ───────────────────────────────────────────────────────────
@@ -306,12 +356,25 @@ class ICDNModel:
                 "(it is not stored inside checkpoints). Pass the data explicitly."
             )
 
-        if self._features is not None:
-            wide = self._panel_builder.transform(self._features.transform(panel))
+        # Prepend the training tail so lag/rolling windows cross the train boundary
+        if self._train_tail is not None and not self._train_tail.empty:
+            first_period = panel[cfg.schema.period].min()
+            tail = self._train_tail[self._train_tail[cfg.schema.period] < first_period]
+            extended = pd.concat([tail, panel], ignore_index=True) if not tail.empty else panel
         else:
-            # Fallback for models loaded from checkpoint (no FeatureBuilder state)
-            wide = self._panel_builder.transform(FeatureBuilder(cfg).run(panel))
+            extended = panel
+
+        if self._features is not None:
+            wide = self._panel_builder.transform(self._features.transform(extended))
+        else:
+            wide = self._panel_builder.transform(FeatureBuilder(cfg).run(extended))
+
+        # Drop tail rows — keep only the periods the caller requested
+        requested = set(panel[cfg.schema.period].unique())
+        wide = wide[wide[cfg.schema.period].isin(requested)].reset_index(drop=True)
+
         dataset = MultiProductDataset(wide, self.layout, period_col=cfg.schema.period)
+
         factory = DataLoaderFactory(
             batch_size=cfg.batch_size,
             num_workers=cfg.num_workers,
