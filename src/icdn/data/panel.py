@@ -168,7 +168,7 @@ class PanelBuilder:
 
         layout.brand_codes, layout.n_brands = codes_for(self.schema.brand, reserve_zero=True)
         layout.style_codes, layout.n_styles = codes_for(self.schema.style, reserve_zero=True)
-        layout.category_codes, _ = codes_for(self.schema.category, reserve_zero=False)
+        layout.category_codes, _ = codes_for(self.schema.category, reserve_zero=True)
 
         if self.schema.size is not None and self.schema.size in static.columns:
             sizes = pd.to_numeric(static.loc[layout.products, self.schema.size], errors="coerce")

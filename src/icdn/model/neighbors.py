@@ -96,6 +96,11 @@ class SparseNeighborSelector(nn.Module):
         self.register_buffer("frozen_pairs", None)
         self.register_buffer("frozen_edge_bonus", None)
 
+    def _same_known(self, codes: torch.Tensor) -> torch.Tensor:
+        """True iff both ids are knwon (nonzero) and equal."""
+        known = codes != 0
+        return (codes.unsqueeze(0) == codes.unsqueeze(1)) & known.unsqueeze(0) & known.unsqueeze(1)
+
     def _meta_bonus(
         self,
         meta: ProductMetadata | None,
@@ -113,17 +118,15 @@ class SparseNeighborSelector(nn.Module):
         meta = meta.to(device)
 
         if meta.category is not None:
-            same_cat = meta.category.unsqueeze(0) == meta.category.unsqueeze(1)
+            same_cat = self._same_known(meta.category)
         else:
             same_cat = torch.ones(n, n, dtype=torch.bool, device=device)
 
         if meta.brand is not None:
-            same_brand = (meta.brand.unsqueeze(0) == meta.brand.unsqueeze(1)).float()
-            bonus = bonus + F.softplus(self.brand_bonus_raw) * same_brand
+            bonus = bonus + F.softplus(self.brand_bonus_raw) * self._same_known(meta.brand).float()
 
         if meta.style is not None:
-            same_style = (meta.style.unsqueeze(0) == meta.style.unsqueeze(1)).float()
-            bonus = bonus + F.softplus(self.style_bonus_raw) * same_style
+            bonus = bonus + F.softplus(self.style_bonus_raw) * self._same_known(meta.style).float()
 
         if meta.size is not None:
             # Similarity decays with the distance between sizes in log space.
@@ -261,3 +264,5 @@ class SparseNeighborSelector(nn.Module):
 
 def _inv_softplus(x: float) -> float:
     return torch.log(torch.expm1(torch.tensor(float(x)))).item()
+
+
