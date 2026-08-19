@@ -80,13 +80,23 @@ class BlockBootstrapSampler:
         if n_periods < self.block_size:
             return df[df[self.period_col].isin(periods)].copy()
 
-        starts = list(range(0, n_periods - self.block_size + 1, self.block_size)) or [0]
-        chosen = self.rng.choice(len(starts), size=len(starts), replace=True)
+        length = self.block_size
+        # Overlapping starts: every week can appear in some block.
+        starts = list(range(0, n_periods - length + 1))
+        n_blocks = int(np.ceil(n_periods / length))
+        chosen = self.rng.choice(n_blocks, size=n_blocks, replace=True)
 
         pieces = []
+        next_id = 0
+        # Leave a hole so gap-aware lag_1 does not treat block joints as consecutive.
+        gap = 1
         for idx in chosen:
             start = starts[idx]
-            block = periods[start : start + self.block_size]
-            pieces.append(df[df[self.period_col].isin(block)].copy())
+            block_periods = periods[start : start + length]
+            chunk = df[df[self.period_col].isin(block_periods)].copy()
+            remap = {old: next_id + offset for offset, old in enumerate(block_periods)}
+            chunk[self.period_col] = chunk[self.period_col].map(remap)
+            pieces.append(chunk)
+            next_id += length + gap
 
         return pd.concat(pieces, ignore_index=True)
