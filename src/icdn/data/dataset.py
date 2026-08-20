@@ -77,7 +77,7 @@ class DataLoaderFactory:
             dataset,
             batch_size=self.batch_size,
             shuffle=True,
-            drop_last=len(dataset) > self.batch_size,
+            drop_last=False,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
         )

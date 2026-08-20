@@ -234,6 +234,7 @@ class ICDNModel:
             extra["origin"] = self._features._origin
             extra["product_first_rank"] = self._features._product_first_rank
             extra["store_product_first_rank"] = self._features._store_product_first_rank
+            extra["assortment_size"] = self._features._assortment_size
         if self._panel_builder is not None and self._panel_builder._price_fallback_mean is not None:
             extra["price_fallback_mean"] = self._panel_builder._price_fallback_mean
         if self._train_tail is not None:
@@ -265,6 +266,7 @@ class ICDNModel:
             fb._origin = payload["origin"]
             fb._product_first_rank = payload["product_first_rank"]
             fb._store_product_first_rank = payload["store_product_first_rank"]
+            fb._assortment_size = payload["assortment_size"]
             model._features = fb
         if payload.get("price_fallback_mean") is not None:
             model._panel_builder._price_fallback_mean = payload["price_fallback_mean"]

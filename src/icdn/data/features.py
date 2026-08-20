@@ -35,6 +35,7 @@ class FeatureBuilder:
         self._origin: int | None = None
         self._product_first_rank: dict | None = None
         self._store_product_first_rank: pd.Series | None = None
+        self._assortment_size: pd.Series | None = None
 
     def _validate_panel(self, df: pd.DataFrame) -> None:
         schema = self.schema
@@ -107,6 +108,13 @@ class FeatureBuilder:
             for p in np.sort(periods.unique())
         }
         self._max_train_rank = int(periods.max()) - self._origin + 1
+
+        static_group = [store] + ([self.schema.category] if self.schema.category else [])
+        self._assortment_size = (
+            panel.groupby(static_group, observed=True)[product]
+            .nunique()
+            .astype(float)
+        )
 
         temp = panel[[store, product, period]].copy()
         temp[PERIOD_RANK] = temp[period].astype(int) - self._origin + 1
@@ -316,9 +324,21 @@ class FeatureBuilder:
         self.product_features += ["n_new_neighbors", "share_new_neighbors"]
 
         static_group = [store] + ([category] if category else [])
-        df["assortment_size"] = (
-            df.groupby(static_group, observed=True)[product].transform("nunique").astype(float)
-        )
+        if self._assortment_size is not None:
+            sizes = self._assortment_size.rename("assortment_size").reset_index()
+            df = df.merge(sizes, on=static_group, how="left")
+            # store/category not seen in training: do not use unique in the complete panel
+            missing = df["assortment_size"].isna()
+            if missing.any():
+                # Lines of this store-period, aligned with n_neighbors
+                df.loc[missing, "assortment_size"] = (df.loc[missing, "n_neighbors"] + 1.0)
+        else:
+            # run() without fit(): same axis that train, but only for this panel
+            df["assortment_size"] = (
+                df.groupby(static_group, observed=True)[product]
+                .transform("nunique")
+                .astype(float)
+            )
         self.product_features.append("assortment_size")
         return df
 
