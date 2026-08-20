@@ -110,7 +110,9 @@ class Trainer:
                 meta,
                 linear_warmup,
             )
-            val_loss = self._evaluate_epoch(model, val_loader, loss_fn, meta, linear_warmup)
+            val_loss = self._evaluate_with_train_graph(
+                model, train_loader, val_loader, loss_fn, meta, linear_warmup
+            )
 
             history["train_loss"].append(train_loss)
             history["val_loss"].append(val_loss)
@@ -195,6 +197,31 @@ class Trainer:
             denom += weight
 
         return total / max(denom, 1.0)
+
+    @torch.no_grad()
+    def _evaluate_with_train_graph(
+        self,
+        model,
+        train_loader,
+        val_loader,
+        loss_fn,
+        meta,
+        linear_warmup: bool = False,
+    ) -> float:
+        """Validate with the train-frozen competitor graph, then restore online mode."""
+        selector = getattr(getattr(model, "head", None), "neighbor_selector", None)
+        if selector is None:
+            return self._evaluate_epoch(model, val_loader, loss_fn, meta, linear_warmup)
+
+        prev_pairs = selector.frozen_pairs
+        prev_bonus = selector.frozen_edge_bonus
+        try:
+            self.freeze_graph(model, train_loader, meta)
+            return self._evaluate_epoch(model, val_loader, loss_fn, meta, linear_warmup)
+        finally:
+            # Back to online selection for the next training epoch.
+            selector.frozen_pairs = prev_pairs
+            selector.frozen_edge_bonus = prev_bonus
 
     def _compute_loss(self, model, batch, loss_fn, meta, linear_warmup: bool = False):
         needs_E = self.config.lambda_elast > 0.0

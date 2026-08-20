@@ -1,5 +1,10 @@
 import torch
 
+from torch.utils.data import DataLoader, Dataset
+
+from icdn import ICDNConfig
+from icdn.training import Trainer
+
 from icdn.model import (
     ICDN,
     IntegrableDemandHead,
@@ -142,3 +147,89 @@ def test_warmup_is_exactly_log_linear():
     assert torch.count_nonzero(aux["w"]) == 0
     assert torch.count_nonzero(aux["w_cross"]) == 0
     assert torch.count_nonzero(aux["u"]) == 0
+
+
+class _DictBatchDataset(Dataset):
+    """One observation per index; DataLoader stacks to a batch dict."""
+
+    def __init__(self, batch: dict):
+        self.batch = batch
+        self.n = int(batch["ids"].shape[0])
+
+    def __len__(self) -> int:
+        return self.n
+
+    def __getitem__(self, idx: int) -> dict:
+        return {key: value[idx] for key, value in self.batch.items()}
+
+
+def _loader_from_batch(batch: dict, batch_size: int) -> DataLoader:
+    return DataLoader(
+        _DictBatchDataset(batch),
+        batch_size=batch_size,
+        shuffle=False,
+        drop_last=False,
+    )
+
+
+def test_evaluate_with_train_graph_restores_online_mode():
+    torch.manual_seed(0)
+    model = build_network()
+    selector = model.head.neighbor_selector
+    trainer = Trainer(ICDNConfig(device="cpu", verbose=False, lambda_elast=0.0))
+
+    train_loader = _loader_from_batch(make_batch(B=8), batch_size=4)
+    val_loader = _loader_from_batch(make_batch(B=6), batch_size=3)
+    loss_fn = trainer._build_loss()
+
+    assert selector.frozen_pairs is None
+    trainer._evaluate_with_train_graph(
+        model, train_loader, val_loader, loss_fn, meta=None
+    )
+    assert selector.frozen_pairs is None
+    assert selector.frozen_edge_bonus is None
+
+
+def test_validation_uses_train_frozen_graph_not_val_batch():
+    torch.manual_seed(0)
+    model = build_network()
+    selector = model.head.neighbor_selector
+    trainer = Trainer(ICDNConfig(device="cpu", verbose=False, lambda_elast=0.0))
+
+    train_batch = make_batch(B=10)
+    val_batch = make_batch(B=6)
+    train_loader = _loader_from_batch(train_batch, batch_size=5)
+    val_loader = _loader_from_batch(val_batch, batch_size=2)
+    loss_fn = trainer._build_loss()
+
+    # Reference graph from train (what validation should use).
+    trainer.freeze_graph(model, train_loader, meta=None)
+    train_pairs = selector.frozen_pairs.clone()
+    selector.frozen_pairs = None
+    selector.frozen_edge_bonus = None
+
+    # Online selection on a val batch can differ from the train-frozen graph.
+    model.eval()
+    with torch.no_grad():
+        online_pairs, _ = selector.run(model.encode(val_batch))
+    assert not torch.equal(online_pairs, train_pairs)
+
+    seen = {}
+
+    def _capture_run(h, meta=None):
+        pairs, weights = original_run(h, meta=meta)
+        seen["pairs"] = pairs.detach().clone()
+        return pairs, weights
+
+    original_run = selector.run
+    selector.run = _capture_run
+    try:
+        trainer._evaluate_with_train_graph(
+            model, train_loader, val_loader, loss_fn, meta=None
+        )
+    finally:
+        selector.run = original_run
+
+    assert "pairs" in seen
+    assert torch.equal(seen["pairs"], train_pairs)
+    assert selector.frozen_pairs is None  # online mode restored
