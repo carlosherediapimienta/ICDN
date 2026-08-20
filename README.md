@@ -91,3 +91,16 @@ pip install icdn
 ## License
 
 See [LICENSE](LICENSE).
+
+## Citation
+If you use this software in your research, please cite:
+> Heredia, C., & Roncel, D. (2026). *Integrable Elasticity via Neural Demand Potentials*. arXiv:2605.22820.  
+> https://arxiv.org/abs/2605.22820
+```bibtex
+@article{heredia2026integrable,
+  title   = {Integrable Elasticity via Neural Demand Potentials},
+  author  = {Heredia, Carlos and Roncel, Daniel},
+  journal = {arXiv preprint arXiv:2605.22820},
+  year    = {2026},
+  url     = {https://arxiv.org/abs/2605.22820}
+}
