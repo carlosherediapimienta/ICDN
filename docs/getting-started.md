@@ -22,7 +22,7 @@ back to learned attention alone.
 
 | Role | Effect |
 |---|---|
-| `category` | Products only compete inside the same category. |
+| `category` | Products only compete inside the same category when `same_category_first=True`. |
 | `brand` | Same-brand pairs are favoured as competitors. |
 | `style` | Same sub-segment pairs are favoured. |
 | `size` | Similar pack sizes are favoured. |

@@ -62,8 +62,8 @@ config = ICDNConfig(
         price="avg_price",
         units="qty",
         promo="promo_flag",
-        category="category",   # optional, restricts who competes with whom
-        brand="brand",         # optional, biases competitor selection
+        category="category",   # optional
+        brand="brand",         # optional
     ),
     n_products=10,
 )

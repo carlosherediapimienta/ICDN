@@ -9,8 +9,7 @@ from pathlib import Path
 
 import torch
 
-FORMAT_VERSION = 1
-
+FORMAT_VERSION = 2
 
 def save_checkpoint(
     path: str | Path,
