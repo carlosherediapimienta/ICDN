@@ -231,6 +231,7 @@ class ICDNModel:
         if self._features is not None:
             extra["period_rank_map"] = self._features._period_rank_map
             extra["max_train_rank"]  = self._features._max_train_rank
+            extra["origin"] = self._features._origin
             extra["product_first_rank"] = self._features._product_first_rank
             extra["store_product_first_rank"] = self._features._store_product_first_rank
         if self._panel_builder is not None and self._panel_builder._price_fallback_mean is not None:
@@ -261,6 +262,7 @@ class ICDNModel:
             fb = FeatureBuilder(model.config)
             fb._period_rank_map = payload["period_rank_map"]
             fb._max_train_rank = payload["max_train_rank"]
+            fb._origin = payload["origin"]
             fb._product_first_rank = payload["product_first_rank"]
             fb._store_product_first_rank = payload["store_product_first_rank"]
             model._features = fb
