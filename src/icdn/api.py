@@ -9,7 +9,7 @@ import torch
 
 from .config import ICDNConfig
 from .data.dataset import DataLoaderFactory, MultiProductDataset
-from .data.features import FeatureBuilder
+from .data.features import LOG_PRICE, FeatureBuilder
 from .data.panel import PanelBuilder, PanelLayout
 from .data.splits import TemporalSplitter
 from .model.context import ProductTokenBuilder
@@ -126,7 +126,7 @@ class ICDNModel:
         self.layout = self._panel_builder.layout
 
         seed_everything(cfg.seed)
-        self._model = self._build_model(train_wide)
+        self._model = self._build_model(train_long)
         loaders = self._build_loaders(train_wide, val_wide)
 
         trainer = Trainer(cfg)
@@ -289,9 +289,23 @@ class ICDNModel:
             size=None if layout.sizes is None else torch.tensor(layout.sizes, dtype=torch.float32),
         )
 
-    def _build_model(self, train_wide: pd.DataFrame) -> ICDN:
-        n = self.layout.n_products
-        prices = train_wide[[f"log_price_{i}" for i in range(n)]].to_numpy()
+    def _build_model(self, train_long: pd.DataFrame) -> ICDN:
+        layout = self.layout
+        schema = self.config.schema
+        products = layout.products
+        
+        prices = (
+            train_long.loc[train_long[schema.product].isin(products)]
+            .pivot_table(
+                index=[schema.period, schema.store],
+                columns=schema.product,
+                values=LOG_PRICE,
+                aggfunc="mean",
+                observed=True,
+            )
+            .reindex(columns=products)
+            .to_numpy(dtype=np.float64)
+        )
         return self._instantiate(spline_prices=prices).to(self._device)
 
     def _instantiate(self, spline_prices: np.ndarray | None) -> ICDN:

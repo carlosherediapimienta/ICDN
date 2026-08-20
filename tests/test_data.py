@@ -1,9 +1,13 @@
 import pytest
-
 import numpy as np
 import pandas as pd
-from icdn.data import FeatureBuilder, MultiProductDataset, PanelBuilder, TemporalSplitter
+import torch
+from icdn.data.features import LOG_PRICE
 
+from icdn.data import (
+    FeatureBuilder, MultiProductDataset, PanelBuilder, TemporalSplitter
+)
+from icdn.model.splines import SplineBuilder
 
 def build_wide(panel, config):
     features = FeatureBuilder(config)
@@ -11,6 +15,67 @@ def build_wide(panel, config):
     builder = PanelBuilder(config)
     wide = builder.fit_transform(long_df, features.shared_features, features.product_features)
     return builder.layout, wide
+
+def test_spline_basis_uses_observed_prices_not_imputed_wide(panel, config):
+    """Knots/shift/scale must come from observed train prices, not imputed fills."""
+    schema = config.schema
+    store, product, period = schema.store, schema.product, schema.period
+
+    features = FeatureBuilder(config)
+    full_long = features.fit_transform(panel)
+    builder = PanelBuilder(config)
+    builder.fit(full_long, features.shared_features, features.product_features)
+    products = builder.layout.products
+    assert len(products) >= 2
+
+    target = products[0]
+    hole_store = full_long[store].iloc[0]
+    # Wipe one store for the target SKU → column-mean fallback pollutes that column.
+    drop = (full_long[product] == target) & (full_long[store] == hole_store)
+    train_long = full_long.loc[~drop].reset_index(drop=True)
+    assert int(drop.sum()) > 10
+
+    train_wide = builder.transform(train_long)
+    n_knots = config.n_knots
+
+    observed = (
+        train_long.loc[train_long[product].isin(products)]
+        .pivot_table(
+            index=[period, store],
+            columns=product,
+            values=LOG_PRICE,
+            aggfunc="mean",
+            observed=True,
+        )
+        .reindex(columns=products)
+        .to_numpy(dtype=np.float64)
+    )
+    assert np.isnan(observed).any()
+
+    imputed = train_wide[[f"log_price_{i}" for i in range(len(products))]].to_numpy(
+        dtype=np.float64
+    )
+    assert np.isfinite(imputed).all()
+    assert np.isfinite(imputed).sum() > np.isfinite(observed).sum()
+
+    spline = SplineBuilder()
+    basis_obs = spline.build_basis(observed, n_knots=n_knots)
+    basis_imp = spline.build_basis(imputed, n_knots=n_knots)
+
+    # Mean-fallback cells change the empirical price distribution.
+    assert not torch.allclose(basis_obs.shift, basis_imp.shift)
+    assert not torch.allclose(basis_obs.knots, basis_imp.knots)
+
+    from icdn import ICDNModel
+
+    model = ICDNModel(config)
+    model.layout = builder.layout
+    model._panel_builder = builder
+    built = model._build_model(train_long).price_splines
+
+    torch.testing.assert_close(built.knots.cpu(), basis_obs.knots)
+    torch.testing.assert_close(built.shift.cpu(), basis_obs.shift)
+    torch.testing.assert_close(built.scale.cpu(), basis_obs.scale)
 
 
 def test_validation_lags_use_train_history(panel, config):
