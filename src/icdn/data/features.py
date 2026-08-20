@@ -230,7 +230,7 @@ class FeatureBuilder:
         for window in self.config.rolling_windows:
             col, miss = f"roll_{window}", f"miss_roll_{window}"
             # shift(1) keeps the window strictly historical; rolling is over weeks, no rows.
-            rolled = demand.shift(1, axis=1).rolling(window, min_periods=1, axis=1).mean()
+            rolled = demand.shift(1, axis=1).T.rolling(window, min_periods=1).mean().T
             df = self._join_calendar_feature(df, rolled, col, miss)
 
         return df
