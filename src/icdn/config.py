@@ -18,7 +18,7 @@ class PanelSchema:
         product: product identifier.
         period: period identifier, expected to be sortable (e.g. a week index).
         price: unit price in levels (strictly positive). Logged internally.
-        units: units sold (non-negative). Transformed with log1p internally.
+        units: units sold (strictly positive). Transformed with log internally.
         promo: binary promotional flag.
         category: products only compete inside the same category.
         brand: brand identifier, biases competitor selection.

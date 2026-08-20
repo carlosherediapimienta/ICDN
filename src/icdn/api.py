@@ -441,8 +441,8 @@ class ICDNModel:
         return pd.concat(frames, ignore_index=True)
 
     def _to_levels(self, log_values: pd.Series) -> pd.Series:
-        # Inverse of log1p. Clip so an undertrained model cannot emit inf.
-        levels = np.expm1(log_values.astype("float64").clip(upper=_MAX_LOG_DEMAND))
+        # Inverse of log. Clip so an undertrained model cannot emit inf.
+        levels = np.exp(log_values.astype("float64").clip(upper=_MAX_LOG_DEMAND))
         return levels.clip(lower=0.0)
 
     def _require_fitted(self) -> None:

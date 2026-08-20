@@ -56,7 +56,12 @@ def test_panel_rejects_non_finite_or_non_positive_price(panel, config):
 def test_panel_rejects_negative_units_and_size(panel, config):
     broken = panel.copy()
     broken.loc[broken.index[0], "units"] = -1.0
-    with pytest.raises(ValueError, match="non-negative"):
+    with pytest.raises(ValueError, match="strictly positive"):
+        FeatureBuilder(config).run(broken)
+
+    broken = panel.copy()
+    broken.loc[broken.index[0], "units"] = 0.0
+    with pytest.raises(ValueError, match="strictly positive"):
         FeatureBuilder(config).run(broken)
 
     broken = panel.copy()

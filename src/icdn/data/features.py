@@ -53,9 +53,9 @@ class FeatureBuilder:
         units = pd.to_numeric(df[schema.units], errors="coerce")
         if not np.isfinite(price).all() or not np.isfinite(units).all():
             raise ValueError("price and units must be finite")
-        if (price <= 0).any() or (units < 0).any():
+        if (price <= 0).any() or (units <= 0).any():
             raise ValueError(
-                "price must be strictly positive and units non-negative. "
+                "price must be strictly positive and units strictly positive. "
                 "Pass levels, not logs."
             )
 
@@ -129,13 +129,13 @@ class FeatureBuilder:
         schema = self.schema
         price = pd.to_numeric(df[schema.price], errors="coerce")
         units = pd.to_numeric(df[schema.units], errors="coerce")
-        if (price <= 0).any() or (units < 0).any():
+        if (price <= 0).any() or (units <= 0).any():
             raise ValueError(
-                "price must be strictly positive and units non-negative."
-                "Pass levels, not logs: price p > 0 and units ≥ 0."
+                "price must be strictly positive and units strictly positive."
+                "Pass levels, not logs: price p > 0 and units > 0."
             )
         df[LOG_PRICE] = np.log(price)
-        df[LOG_DEMAND] = np.log1p(units)
+        df[LOG_DEMAND] = np.log(units)
         return df
 
     # ── Calendar ────────────────────────────────────────────────────────────

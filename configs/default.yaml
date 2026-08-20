@@ -13,7 +13,6 @@ schema:
   brand: null
   style: null
   size: null
-  values_are_log: false
 
 n_products: null
 
