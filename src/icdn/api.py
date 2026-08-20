@@ -1,6 +1,7 @@
 """Public interface of the ICDN library."""
 
 from pathlib import Path
+from queue import Empty
 
 import numpy as np
 import pandas as pd
@@ -98,7 +99,22 @@ class ICDNModel:
         # Build the features
         features = FeatureBuilder(cfg)
         train_long = features.fit_transform(train_raw)
-        val_long   = features.transform(val_raw)
+
+        # Validation must see train history for lags/rollings
+        period = cfg.schema.period
+        if self._train_tail is not None and not self._train_tail.empty:
+            first_val = val_raw[period].min()
+            tail = self._train_tail[self._train_tail[period] < first_val]
+            val_extended = (
+                pd.concat([tail, val_raw], ignore_index=True) if not tail.empty else val_raw
+            )
+        else:
+            val_extended = val_raw
+
+        val_long   = features.transform(val_extended)
+        val_periods = set(val_raw[period].unique())
+        val_long = val_long[val_long[period].isin(val_periods)].reset_index(drop=True)
+
         self._features = features
     
         # PanelBuilder only ajusted with the train panel

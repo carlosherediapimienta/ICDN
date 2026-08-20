@@ -1,5 +1,7 @@
 import pytest
 
+import numpy as np
+import pandas as pd
 from icdn.data import FeatureBuilder, MultiProductDataset, PanelBuilder, TemporalSplitter
 
 
@@ -9,6 +11,58 @@ def build_wide(panel, config):
     builder = PanelBuilder(config)
     wide = builder.fit_transform(long_df, features.shared_features, features.product_features)
     return builder.layout, wide
+
+
+def test_validation_lags_use_train_history(panel, config):
+    """Holdout features must see the training tail, as in fit() / _prepare()."""
+    period = config.schema.period
+    store, product = config.schema.store, config.schema.product
+    train_raw, val_raw = TemporalSplitter(period_col=period).single_split(
+        panel, train_frac=1.0 - config.validation_fraction
+    )
+    assert not val_raw.empty
+    n_tail = max(list(config.lags) + list(config.rolling_windows))
+    train_tail = (
+        train_raw.sort_values([store, product, period])
+        .groupby([store, product], group_keys=False)
+        .tail(n_tail)
+    )
+    features = FeatureBuilder(config)
+    features.fit_transform(train_raw)
+    first_val = val_raw[period].min()
+    tail = train_tail[train_tail[period] < first_val]
+    val_extended = pd.concat([tail, val_raw], ignore_index=True) if not tail.empty else val_raw
+    val_long = features.transform(val_extended)
+    val_long = val_long[val_long[period].isin(val_raw[period].unique())]
+    # Pick one series present in both sides of the split.
+    keys = [store, product]
+    shared = (
+        train_raw[keys].drop_duplicates()
+        .merge(val_raw[keys].drop_duplicates(), on=keys)
+        .iloc[0]
+    )
+    s, p = shared[store], shared[product]
+    last_train = (
+        train_raw[(train_raw[store] == s) & (train_raw[product] == p)]
+        .sort_values(period)
+        .iloc[-1]
+    )
+    first_holdout = (
+        val_long[(val_long[store] == s) & (val_long[product] == p)]
+        .sort_values(period)
+        .iloc[0]
+    )
+    expected_lag = float(np.log(last_train[config.schema.units]))
+    assert first_holdout["miss_lag_1"] == 0.0
+    assert first_holdout["lag_1"] == pytest.approx(expected_lag, rel=0, abs=1e-9)
+    # Guard against the old bug: transforming val alone marks lag_1 as missing.
+    cold = features.transform(val_raw)
+    cold_first = (
+        cold[(cold[store] == s) & (cold[product] == p)]
+        .sort_values(period)
+        .iloc[0]
+    )
+    assert cold_first["miss_lag_1"] == 1.0
 
 
 def test_feature_builder_generates_history_without_leakage(panel, config):
