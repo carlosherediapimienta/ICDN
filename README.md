@@ -39,7 +39,7 @@ model.save("artifacts/icdn")
 
 `elasticities()` returns one row per store and product pair:
 
-| store_code | product | competitor | kind | elasticity | ci_low | ci_high |
+| store_code | product | competitor | kind | elasticity | temporal_q025 | temporal_q975 |
 |---|---|---|---|---|---|---|
 | S1 | P1 | P1 | own | -2.14 | -2.42 | -1.88 |
 | S1 | P1 | P2 | cross | 0.37 | 0.19 | 0.55 |
