@@ -86,6 +86,7 @@ class ICDNConfig:
     dropout: float = 0.2547
     k_neighbors: int = 4
     d_store: int = 16
+    d_product: int = 16
     d_brand: int = 8
     d_style: int = 8
     use_cross: bool = True
