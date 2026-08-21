@@ -92,36 +92,6 @@ pip install icdn
 
 See [LICENSE](LICENSE).
 
-## Relation to the paper
-
-This library is an improved implementation of
-[Heredia & Roncel (2026)](https://arxiv.org/abs/2605.22820), not a bit-for-bit
-reproduction of the architecture used in the reported experiments.
-
-The published model had no product-identity embedding: two SKUs with the same
-covariates received the same token. This package adds a learned embedding of
-size `n × d_product` (default `d_product=16`), indexed by the frozen panel
-slot, so product heterogeneity is no longer carried only by covariates. That
-correction is the right modelling choice; it also means published parameter
-counts, scalability tables and ablations refer to the previous architecture.
-
-The paper states that the number of parameters does not depend on `n` and
-reports 64,285 parameters. With the product embedding, the count still does
-not depend on `k` (the competitor set), but it grows as `n · d_product`:
-
-| Products (`n`) | Parameters |
-|---|---|
-| 5 | 66,205 |
-| 25 | 66,525 |
-| 50 | 66,925 |
-| 100 | 67,725 |
-| 200 | 69,325 |
-
-Treat this package as a new architectural revision. Reuse the paper's
-hyperparameters as a starting point, not as a claim that `fit()` recovers the
-published metrics. Empirical numbers, tuning and ablations would need to be
-re-run to speak for this version.
-
 ## Citation
 If you use this software in your research, please cite:
 > Heredia, C., & Roncel, D. (2026). *Integrable Elasticity via Neural Demand Potentials*. arXiv:2605.22820.  

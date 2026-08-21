@@ -23,7 +23,6 @@ def build_network(n=4, n_knots=3, n_shared=5, n_product=6, n_stores=2):
         n_shared_features=n_shared,
         n_product_features=n_product,
         d_store=4,
-        d_product=4,
         n_brands=3,
         d_brand=2,
         n_styles=3,
@@ -49,10 +48,10 @@ def make_batch(B=7, n=4, n_shared=5, n_product=6, n_stores=2):
     }
 
 
-def test_identical_covariates_still_yield_distinct_product_tokens():
+def test_identical_covariates_yield_identical_product_tokens():
     builder = ProductTokenBuilder(
         n=2, n_stores=1, n_shared_features=3, n_product_features=4,
-        d_store=4, d_product=8, n_brands=1, d_brand=2, n_styles=1, d_style=2,
+        d_store=4, n_brands=1, d_brand=2, n_styles=1, d_style=2,
     )
     B = 1
     batch = {
@@ -62,7 +61,7 @@ def test_identical_covariates_still_yield_distinct_product_tokens():
         "product_cat": torch.zeros(B, 2, 2, dtype=torch.long),
     }
     tokens = builder(batch)
-    assert not torch.allclose(tokens[0, 0], tokens[0, 1])
+    assert torch.allclose(tokens[0, 0], tokens[0, 1])
 
 def test_forward_returns_demand_and_elasticities_per_product():
     model = build_network()

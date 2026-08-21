@@ -337,7 +337,6 @@ class ICDNModel:
             n_shared_features=len(layout.shared_features),
             n_product_features=len(layout.product_features),
             d_store=cfg.d_store,
-            d_product=cfg.d_product,
             n_brands=layout.n_brands,
             d_brand=cfg.d_brand,
             n_styles=layout.n_styles,
