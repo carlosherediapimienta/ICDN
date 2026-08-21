@@ -15,9 +15,6 @@ ICDN consumes a **long panel**: one row per store, product and period.
 | Units | `units` | Non-negative sales volume. |
 | Promotion | `on_promo` | Binary flag. |
 
-If your price and units are already logged, set
-`PanelSchema(values_are_log=True)` and no transformation is applied.
-
 ### Optional columns
 
 These improve how competitors are chosen. Omit any of them and the model falls
@@ -25,7 +22,7 @@ back to learned attention alone.
 
 | Role | Effect |
 |---|---|
-| `category` | Products only compete inside the same category. |
+| `category` | Products only compete inside the same category when `same_category_first=True`. |
 | `brand` | Same-brand pairs are favoured as competitors. |
 | `style` | Same sub-segment pairs are favoured. |
 | `size` | Similar pack sizes are favoured. |
@@ -53,7 +50,7 @@ The model works on a fixed set of `n_products` positions. When
 `n_products` is set, ICDN greedily picks the products that share the densest
 store-period overlap, then drops any product observed in fewer than
 `min_coverage` of the store-period cells. Position `i` maps to
-`model.products[i]` and stays stable across predictions and checkpoints.
+`model.products[i]` and stays stable across scoring and checkpoints.
 
 Cross-price parameters grow with the square of the number of products, so
 start around five to ten and grow from there.
@@ -107,15 +104,14 @@ the price of `competitor`:
   is imposed.
 
 Aggregated output summarises each store and product pair across periods with
-its mean, standard deviation and a 95% interval. Pass `aggregate=False` for one
-row per observation, which is what you want when studying how elasticity moves
-with promotions or seasonality.
+its mean, standard deviation and percentiles 2.5/97.5 across periods (not a confidence interval). Pass `aggregate=False` for one row per observation, which is what you want when studying how elasticity moves with promotions or seasonality.
 
 ## 6. Saving and serving
 
 ```python
 path = model.save("artifacts/icdn")
 restored = ICDNModel.load(path)
+restored.score(new_panel)
 restored.elasticities(new_panel)
 ```
 

@@ -13,7 +13,6 @@ schema:
   brand: null
   style: null
   size: null
-  values_are_log: false
 
 n_products: null
 
@@ -34,6 +33,7 @@ d_store: 16
 d_brand: 8
 d_style: 8
 use_cross: true
+enforce_negative_beta: true
 
 # Objective
 huber_delta: 1.0

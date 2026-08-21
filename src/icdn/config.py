@@ -1,5 +1,6 @@
 """User-facing configuration for the ICDN pipeline."""
 
+import math
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
@@ -17,14 +18,13 @@ class PanelSchema:
         store: store or point-of-sale identifier.
         product: product identifier.
         period: period identifier, expected to be sortable (e.g. a week index).
-        price: unit price. Set ``values_are_log`` when it is already logged.
-        units: units sold, on the same basis as the price.
+        price: unit price in levels (strictly positive). Logged internally.
+        units: units sold (strictly positive). Transformed with log internally.
         promo: binary promotional flag.
         category: products only compete inside the same category.
         brand: brand identifier, biases competitor selection.
         style: sub-segment identifier, biases competitor selection.
         size: pack size, biases competitor selection toward similar formats.
-        values_are_log: True when price and units are already in log space.
     """
 
     store: str = "store_code"
@@ -37,7 +37,6 @@ class PanelSchema:
     brand: str | None = None
     style: str | None = None
     size: str | None = None
-    values_are_log: bool = False
 
     @property
     def required(self) -> list[str]:
@@ -59,6 +58,12 @@ class PanelSchema:
             raise ValueError(
                 f"the panel is missing required columns {missing}. "
                 f"Adjust PanelSchema if your columns have different names."
+            )
+        missing_optional = [c for c in self.optional.values() if c not in columns]
+        if missing_optional:
+            raise ValueError(
+                f"the panel is missing optional columns {missing_optional} "
+                f"that are set in PanelSchema. Add them or set those schema fields to None."
             )
 
 
@@ -91,6 +96,8 @@ class ICDNConfig:
     d_brand: int = 8
     d_style: int = 8
     use_cross: bool = True
+    enforce_negative_beta: bool = True
+    same_category_first: bool = False
 
     # ── Objective ───────────────────────────────────────────────────────────
     huber_delta: float = 1.0
@@ -124,6 +131,77 @@ class ICDNConfig:
             setattr(self, name, tuple(getattr(self, name)))
         for name in ("own_elasticity_bounds", "cross_elasticity_bounds"):
             setattr(self, name, tuple(getattr(self, name)))
+
+        if self.k_neighbors < 0:
+            raise ValueError("k_neighbors must be >= 0")
+        if not 0.0 < self.validation_fraction < 1.0:
+            raise ValueError("validation_fraction must be in (0, 1)")
+        if not 0.0 <= self.dropout < 1.0:
+            raise ValueError("dropout must be in [0, 1)")
+        if self.batch_size < 1:
+            raise ValueError("batch_size must be >= 1")
+        if self.epochs < 1:
+            raise ValueError("epochs must be >= 1")
+        if self.warmup_epochs < 0:
+            raise ValueError("warmup_epochs must be >= 0")
+        if self.n_knots < 1:
+            raise ValueError("n_knots must be >= 1")
+        if not self.lags:
+            raise ValueError("lags must be a non-empty tuple of positive integers")
+        if any(k < 1 for k in self.lags):
+            raise ValueError("every lag must be >= 1")
+        if not self.rolling_windows:
+            raise ValueError("rolling_windows must be a non-empty tuple of positive integers")
+        if any(w < 1 for w in self.rolling_windows):
+            raise ValueError("every rolling window must be >= 1")
+        lo, hi = self.own_elasticity_bounds
+        if not (math.isfinite(float(lo)) and math.isfinite(float(hi))):
+            raise ValueError("own_elasticity_bounds must be finite")
+        if lo >= hi:
+            raise ValueError(f"own_elasticity_bounds are inverted: {lo} >= {hi}")
+        lo, hi = self.cross_elasticity_bounds
+        if not (math.isfinite(float(lo)) and math.isfinite(float(hi))):
+            raise ValueError("cross_elasticity_bounds must be finite")
+        if lo >= hi:
+            raise ValueError(f"cross_elasticity_bounds are inverted: {lo} >= {hi}")
+        if self.min_coverage < 0.0 or self.min_coverage > 1.0:
+            raise ValueError("min_coverage must be in [0, 1]")
+        if self.min_products is not None and self.min_products < 1:
+            raise ValueError("min_products must be >= 1 when set")
+
+        if self.n_products is not None and self.n_products < 2:
+            raise ValueError("n_products must be >= 2 when set")
+        if self.lambda_smooth < 0:
+            raise ValueError("lambda_smooth must be >= 0")
+        if self.lambda_elast < 0:
+            raise ValueError("lambda_elast must be >= 0")
+        if self.huber_delta <= 0:
+            raise ValueError("huber_delta must be > 0")
+        if self.lr <= 0:
+            raise ValueError("lr must be > 0")
+        if self.warmup_lr <= 0:
+            raise ValueError("warmup_lr must be > 0")
+        if self.weight_decay < 0:
+            raise ValueError("weight_decay must be >= 0")
+        if self.grad_clip <= 0:
+            raise ValueError("grad_clip must be > 0")
+        if self.smoothing_window < 1:
+            raise ValueError("smoothing_window must be >= 1")
+        if not self.seasonal_periods:
+            raise ValueError("seasonal_periods must be a non-empty tuple of positive integers")
+        if any(p < 1 for p in self.seasonal_periods):
+            raise ValueError("every seasonal period must be >= 1")
+        if self.num_workers < 0:
+            raise ValueError("num_workers must be >= 0")
+        if not self.hidden:
+            raise ValueError("hidden must be a non-empty tuple of positive widths")
+        if any(w < 1 for w in self.hidden):
+            raise ValueError("every hidden width must be >= 1")
+        allowed_act = {"gelu", "tanh", "softplus"}
+        if self.activation not in allowed_act:
+            raise ValueError(
+                f"activation {self.activation!r} is unknown, use one of {sorted(allowed_act)}"
+            )
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "ICDNConfig":

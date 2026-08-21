@@ -30,10 +30,77 @@ class FeatureBuilder:
         self.schema = config.schema
         self.shared_features: list[str] = []
         self.product_features: list[str] = []
+        self._period_rank_map: dict | None = None
+        self._max_train_rank: int = 0
+        self._origin: int | None = None
+        self._product_first_rank: dict | None = None
+        self._store_product_first_rank: pd.Series | None = None
+        self._assortment_size: pd.Series | None = None
 
-    def run(self, panel: pd.DataFrame) -> pd.DataFrame:
+    def _validate_panel(self, df: pd.DataFrame) -> None:
         schema = self.schema
-        schema.validate(panel.columns)
+        schema.validate(df.columns)
+        store, product, period = schema.store, schema.product, schema.period
+        keys = [store, product, period]
+        duplicated = df.duplicated(keys, keep=False)
+        if duplicated.any():
+            n = int(duplicated.sum())
+            raise ValueError(
+                f"{n} duplicate (store, product, period) rows. "
+                "Aggregate units (sum) and prices (e.g. quantity-weighted) "
+                "before calling fit(); a silent mean after log() is not valid."
+            )
+
+        for col in (store, product, period):
+            if df[col].isna().any():
+                raise ValueError(f"{col} contains null values")
+
+        period_vals = pd.to_numeric(df[period], errors="coerce")
+        if not np.isfinite(period_vals).all():
+            raise ValueError(f"{period} must be a finite integer week index")
+
+        price = pd.to_numeric(df[schema.price], errors="coerce")
+        units = pd.to_numeric(df[schema.units], errors="coerce")
+        if not np.isfinite(price).all() or not np.isfinite(units).all():
+            raise ValueError("price and units must be finite")
+        if (price <= 0).any() or (units <= 0).any():
+            raise ValueError(
+                "price must be strictly positive and units strictly positive. "
+                "Pass levels, not logs."
+            )
+
+        promo = pd.to_numeric(df[schema.promo], errors="coerce")
+        if not np.isfinite(promo).all() or not promo.isin((0, 1)).all():
+            raise ValueError(
+                f"{schema.promo} must be a binary flag (0 or 1). "
+                "Non-numeric values are not treated as zero."
+            )
+
+        if schema.size is not None:
+            size = pd.to_numeric(df[schema.size], errors="coerce")
+            if not np.isfinite(size).all():
+                raise ValueError(f"{schema.size} must be finite")
+            if (size < 0).any():
+                raise ValueError(f"{schema.size} must be non-negative")
+
+        static_cols = [
+            c for c in (schema.brand, schema.style, schema.category, schema.size)
+            if c is not None
+        ]
+        if static_cols:
+            n_values = df.groupby(product, observed=True)[static_cols].nunique(dropna=False)
+            bad = n_values[(n_values > 1).any(axis=1)]
+            if not bad.empty:
+                sku = bad.index[0]
+                cols = [c for c in static_cols if int(bad.loc[sku, c]) > 1]
+                raise ValueError(
+                    f"product {sku!r} has inconsistent static metadata in {cols}. "
+                    "Brand, style, category and size must be constant per SKU."
+                )
+
+    def run(self, panel: pd.DataFrame, requested_col: str | None = None) -> pd.DataFrame:
+        self._validate_panel(panel)
+        schema = self.schema
 
         df = panel.copy()
         store, product, period = schema.store, schema.product, schema.period
@@ -46,37 +113,88 @@ class FeatureBuilder:
         df = self._add_calendar(df)
         df = self._add_lifecycle(df)
         df = self._add_lags_and_rollings(df)
+
+        if requested_col is not None:
+            df = (
+                df.loc[df[requested_col].astype(bool)]
+                .drop(columns=[requested_col])
+                .reset_index(drop=True)
+            )
+
         df = self._add_promo(df)
         df = self._add_competitive(df)
         df = self._add_static_attributes(df)
-
+        
         return df
+
+    def fit(self, panel: pd.DataFrame) -> "FeatureBuilder":
+        self._validate_panel(panel)
+        schema = self.schema
+        store, product, period = schema.store, schema.product, schema.period
+
+        periods = panel[period].dropna()
+        if periods.empty:
+            raise ValueError(f"{period} has no values to fit on")
+        origin = periods.min()
+        if not isinstance(origin, (int, np.integer)):
+            raise TypeError(
+                f"{period} must be an integer week index."
+                "Map dates to a sequential week_id before fitting."
+            )
+        self._origin = int(origin)
+        # keep for debugging
+        self._period_rank_map ={
+            int(p): int(p) - self._origin + 1
+            for p in np.sort(periods.unique())
+        }
+        self._max_train_rank = int(periods.max()) - self._origin + 1
+
+        static_group = [store] + ([self.schema.category] if self.schema.category else [])
+        self._assortment_size = (
+            panel.groupby(static_group, observed=True)[product]
+            .nunique()
+            .astype(float)
+        )
+
+        temp = panel[[store, product, period]].copy()
+        temp[PERIOD_RANK] = temp[period].astype(int) - self._origin + 1
+        self._product_first_rank = temp.groupby(product)[PERIOD_RANK].min().to_dict()
+        self._store_product_first_rank = temp.groupby([store, product])[PERIOD_RANK].min()
+        return self
+
+    def fit_transform(self, panel: pd.DataFrame) -> pd.DataFrame:
+        self.fit(panel)
+        return self.run(panel)
+
+    def transform(self, panel: pd.DataFrame, requested_col: str | None = None,) -> pd.DataFrame:
+        if self._origin is None:
+            raise RuntimeError("FeatureBuilder.transform called before fit")
+        return self.run(panel, requested_col=requested_col)
 
     # ── Targets ─────────────────────────────────────────────────────────────
 
     def _add_targets(self, df: pd.DataFrame) -> pd.DataFrame:
         schema = self.schema
-        if schema.values_are_log:
-            df[LOG_PRICE] = df[schema.price].astype(float)
-            df[LOG_DEMAND] = df[schema.units].astype(float)
-        else:
-            price = pd.to_numeric(df[schema.price], errors="coerce")
-            units = pd.to_numeric(df[schema.units], errors="coerce")
-            if (price <= 0).any() or (units < 0).any():
-                raise ValueError(
-                    "price must be strictly positive and units non-negative. "
-                    "Set PanelSchema(values_are_log=True) if they are already logged."
-                )
-            df[LOG_PRICE] = np.log(price)
-            df[LOG_DEMAND] = np.log1p(units)
+        price = pd.to_numeric(df[schema.price], errors="coerce")
+        units = pd.to_numeric(df[schema.units], errors="coerce")
+        if (price <= 0).any() or (units <= 0).any():
+            raise ValueError(
+                "price must be strictly positive and units strictly positive."
+                "Pass levels, not logs: price p > 0 and units > 0."
+            )
+        df[LOG_PRICE] = np.log(price)
+        df[LOG_DEMAND] = np.log(units)
         return df
 
     # ── Calendar ────────────────────────────────────────────────────────────
 
     def _add_calendar(self, df: pd.DataFrame) -> pd.DataFrame:
-        periods = np.sort(df[self.schema.period].dropna().unique())
-        rank = {p: i + 1 for i, p in enumerate(periods)}
-        df[PERIOD_RANK] = df[self.schema.period].map(rank)
+        if self._origin is not None:
+            df[PERIOD_RANK] = df[self.schema.period].astype(int) - self._origin + 1
+        else:
+            # fit_transform / run without fit: origin = min of panel
+            origin = int(df[self.schema.period].min())
+            df[PERIOD_RANK] = df[self.schema.period].astype(int) - origin + 1
         self.shared_features.append(PERIOD_RANK)
 
         for p in self.config.seasonal_periods:
@@ -87,39 +205,97 @@ class FeatureBuilder:
 
     def _add_lifecycle(self, df: pd.DataFrame) -> pd.DataFrame:
         store, product = self.schema.store, self.schema.product
-        first_product = df.groupby(product)[PERIOD_RANK].transform("min")
-        first_store_product = df.groupby([store, product])[PERIOD_RANK].transform("min")
-        df["periods_seen_product"] = (df[PERIOD_RANK] - first_product).astype(float)
-        df["periods_seen_store_product"] = (df[PERIOD_RANK] - first_store_product).astype(float)
+        if self._product_first_rank is not None:
+            first_product = df[product].map(self._product_first_rank)
+            unknown_p = first_product.isna()
+            if unknown_p.any():
+                first_product = first_product.fillna(
+                    df.groupby(product)[PERIOD_RANK].transform("min")
+                )
+            sp_first = self._store_product_first_rank.reset_index(name="_first_sp")
+            df = df.merge(sp_first, on=[store, product], how="left")
+            unknown_sp = df["_first_sp"].isna()
+            if unknown_sp.any():
+                df.loc[unknown_sp, "_first_sp"] = (
+                    df.loc[unknown_sp]
+                    .groupby([store, product])[PERIOD_RANK]
+                    .transform("min")
+                )
+            df["periods_seen_product"] = (df[PERIOD_RANK] - first_product).astype(float)
+            df["periods_seen_store_product"] = (df[PERIOD_RANK] - df["_first_sp"]).astype(float)
+            df = df.drop(columns=["_first_sp"])
+        else:
+            first_product = df.groupby(product)[PERIOD_RANK].transform("min")
+            first_store_product = df.groupby([store, product])[PERIOD_RANK].transform("min")
+            df["periods_seen_product"] = (df[PERIOD_RANK] - first_product).astype(float)
+            df["periods_seen_store_product"] = (df[PERIOD_RANK] - first_store_product).astype(float)
         self.product_features += ["periods_seen_product", "periods_seen_store_product"]
         return df
 
     # ── History ─────────────────────────────────────────────────────────────
 
+    def _week_grid(self, df: pd.DataFrame) -> list:
+        """ Contiguous week index from the earliest period in play"""
+        period = self.schema.period
+        values = set(df[period].dropna().unique())
+        if self._period_rank_map is not None:
+            values |= set(self._period_rank_map)
+        start, end = min(values), max(values)
+        if not isinstance(start, (int, np.integer)) or not isinstance(end, (int, np.integer)):
+            raise TypeError(
+                f"{period} must be an integer week index to build gap-aware lags."
+                "Map dates to a sequential week_id before fitting."
+            )
+        return list(range(int(start), int(end) + 1))
+    
+    def _join_calendar_feature(
+        self,
+        df: pd.DataFrame,
+        grid: pd.DataFrame,
+        col: str,
+        miss: str,
+    ) -> pd.DataFrame:
+        store, product, period = self.schema.store, self.schema.product, self.schema.period
+        stacked = (
+            grid.stack(future_stack=True)
+            .rename(col)
+            .rename_axis([store, product, period])
+            .reset_index(drop=False)
+        )
+        df = df.merge(stacked, on=[store, product, period], how="left")
+        df[miss] = (~np.isfinite(df[col])).astype(float)
+        df[col] = df[col].fillna(0.0)
+        self.product_features += [col, miss]
+        return df
+
     def _add_lags_and_rollings(self, df: pd.DataFrame) -> pd.DataFrame:
-        grouped = df.groupby([self.schema.store, self.schema.product])[LOG_DEMAND]
+        store, product, period = self.schema.store, self.schema.product, self.schema.period
+        grid = self._week_grid(df)
+
+        demand = (
+            df.pivot_table(
+                index=[store, product],
+                columns=period,
+                values=LOG_DEMAND,
+                aggfunc="mean",
+            )
+        .reindex(columns=grid)
+        )
 
         for k in self.config.lags:
             col, miss = f"lag_{k}", f"miss_lag_{k}"
-            values = grouped.shift(k)
-            df[miss] = (~np.isfinite(values)).astype(float)
-            df[col] = values.fillna(0.0)
-            self.product_features += [col, miss]
+            df = self._join_calendar_feature(df, demand.shift(k, axis=1), col, miss)
 
         for window in self.config.rolling_windows:
             col, miss = f"roll_{window}", f"miss_roll_{window}"
-            # shift(1) keeps the window strictly historical.
-            values = grouped.transform(
-                lambda s, w=window: s.shift(1).rolling(w, min_periods=1).mean()
-            )
-            df[miss] = (~np.isfinite(values)).astype(float)
-            df[col] = values.fillna(0.0)
-            self.product_features += [col, miss]
+            # shift(1) keeps the window strictly historical; rolling is over weeks, no rows.
+            rolled = demand.shift(1, axis=1).T.rolling(window, min_periods=1).mean().T
+            df = self._join_calendar_feature(df, rolled, col, miss)
 
         return df
 
     def _add_promo(self, df: pd.DataFrame) -> pd.DataFrame:
-        promo = pd.to_numeric(df[self.schema.promo], errors="coerce").fillna(0.0)
+        promo = pd.to_numeric(df[self.schema.promo], errors="raise")
         df["promo"] = promo.astype(float)
         self.product_features.append("promo")
 
@@ -188,9 +364,21 @@ class FeatureBuilder:
         self.product_features += ["n_new_neighbors", "share_new_neighbors"]
 
         static_group = [store] + ([category] if category else [])
-        df["assortment_size"] = (
-            df.groupby(static_group, observed=True)[product].transform("nunique").astype(float)
-        )
+        if self._assortment_size is not None:
+            sizes = self._assortment_size.rename("assortment_size").reset_index()
+            df = df.merge(sizes, on=static_group, how="left")
+            # store/category not seen in training: do not use unique in the complete panel
+            missing = df["assortment_size"].isna()
+            if missing.any():
+                # Lines of this store-period, aligned with n_neighbors
+                df.loc[missing, "assortment_size"] = (df.loc[missing, "n_neighbors"] + 1.0)
+        else:
+            # run() without fit(): same axis that train, but only for this panel
+            df["assortment_size"] = (
+                df.groupby(static_group, observed=True)[product]
+                .transform("nunique")
+                .astype(float)
+            )
         self.product_features.append("assortment_size")
         return df
 

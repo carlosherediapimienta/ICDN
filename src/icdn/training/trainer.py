@@ -2,6 +2,8 @@
 
 import copy
 import math
+import random 
+import numpy as np
 
 import torch
 import torch.nn as nn
@@ -15,10 +17,10 @@ from ..model.neighbors import ProductMetadata
 class Trainer:
     """Fits an ICDN model in two phases and then freezes its competitor graph.
 
-    The warm-up phase fits smoothed demand with the spline weights frozen and
-    the price coefficient pinned to a negative prior, which anchors a stable
-    downward-sloping baseline. The main phase releases the splines and fits the
-    raw series, letting the model capture non-linear and cross-price effects
+    The warm-up phase fits smoothed demand with the spline weights frozen and set 
+    to zero and the price coefficient pinned to a negative prior, which anchors a
+    stable downward-sloping baseline. The main phase releases the splines and fits
+    the raw series, letting the model capture non-linear and cross-price effects
     without the early instability that a cold start produces.
     """
 
@@ -36,7 +38,7 @@ class Trainer:
         meta: ProductMetadata | None = None,
     ) -> dict:
         cfg = self.config
-        torch.manual_seed(cfg.seed)
+        seed_everything(cfg.seed)
         model.to(self.device)
         if meta is not None:
             meta = meta.to(self.device)
@@ -44,7 +46,7 @@ class Trainer:
         history = {}
 
         if cfg.warmup_epochs > 0 and warmup_train_loader is not None:
-            self._freeze_splines(model, frozen=True)
+            self._zero_and_freeze_splines(model)
             self._init_price_prior(model)
             history["warmup"] = self._run_phase(
                 model,
@@ -53,6 +55,7 @@ class Trainer:
                 lr=cfg.warmup_lr,
                 n_epochs=cfg.warmup_epochs,
                 meta=meta,
+                linear_warmup=True,
                 label="warmup",
             )
 
@@ -64,6 +67,7 @@ class Trainer:
             lr=cfg.lr,
             n_epochs=cfg.epochs,
             meta=meta,
+            linear_warmup=False,
             label="main",
         )
 
@@ -80,6 +84,7 @@ class Trainer:
         lr: float,
         n_epochs: int,
         meta: ProductMetadata | None,
+        linear_warmup: bool,
         label: str,
     ) -> dict:
         cfg = self.config
@@ -96,8 +101,18 @@ class Trainer:
         history = {"train_loss": [], "val_loss": []}
 
         for epoch in range(n_epochs):
-            train_loss = self._train_epoch(model, train_loader, loss_fn, optimizer, scaler, meta)
-            val_loss = self._evaluate_epoch(model, val_loader, loss_fn, meta)
+            train_loss = self._train_epoch(
+                model,
+                train_loader,
+                loss_fn,
+                optimizer,
+                scaler,
+                meta,
+                linear_warmup,
+            )
+            val_loss = self._evaluate_with_train_graph(
+                model, train_loader, val_loader, loss_fn, meta, linear_warmup
+            )
 
             history["train_loss"].append(train_loss)
             history["val_loss"].append(val_loss)
@@ -130,7 +145,7 @@ class Trainer:
         history["best_val_loss"] = best_loss
         return history
 
-    def _train_epoch(self, model, loader, loss_fn, optimizer, scaler, meta) -> float:
+    def _train_epoch(self, model, loader, loss_fn, optimizer, scaler, meta, linear_warmup: bool = False) -> float:
         cfg = self.config
         model.train()
         total, denom = 0.0, 0.0
@@ -141,42 +156,94 @@ class Trainer:
 
             if scaler is not None:
                 with torch.amp.autocast("cuda"):
-                    loss, logs = self._compute_loss(model, batch, loss_fn, meta)
+                    loss, logs = self._compute_loss(model, batch, loss_fn, meta, linear_warmup)
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
-                nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+                grad_norm = nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+                if not torch.isfinite(grad_norm):
+                    optimizer.zero_grad(set_to_none=True)
+                    scaler.update()
+                    continue
                 scaler.step(optimizer)
                 scaler.update()
+                for name, param in model.named_parameters():
+                    self._require_finite(param, name)
             else:
-                loss, logs = self._compute_loss(model, batch, loss_fn, meta)
+                loss, logs = self._compute_loss(model, batch, loss_fn, meta, linear_warmup)
                 loss.backward()
-                nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+                grad_norm = nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+                if not torch.isfinite(grad_norm):
+                    raise FloatingPointError(f"non-finite gradient norm: {float(grad_norm)}")
                 optimizer.step()
+                for name, param in model.named_parameters():
+                    self._require_finite(param, name)
 
-            weight = batch["obs_mask"].sum().item()
+            weight = (batch["obs_mask"].sum(dim=1) > 0).sum().item()
             total += logs["loss"].item() * weight
             denom += weight
 
         return total / max(denom, 1.0)
 
     @torch.no_grad()
-    def _evaluate_epoch(self, model, loader, loss_fn, meta) -> float:
+    def _evaluate_epoch(self, model, loader, loss_fn, meta, linear_warmup: bool = False) -> float:
         model.eval()
         total, denom = 0.0, 0.0
 
         for batch in loader:
             batch = self._to_device(batch)
-            _, logs = self._compute_loss(model, batch, loss_fn, meta)
-            weight = batch["obs_mask"].sum().item()
+            _, logs = self._compute_loss(model, batch, loss_fn, meta, linear_warmup)
+            weight = (batch["obs_mask"].sum(dim=1) > 0).sum().item()
             total += logs["loss"].item() * weight
             denom += weight
 
         return total / max(denom, 1.0)
 
-    def _compute_loss(self, model, batch, loss_fn, meta):
+    @torch.no_grad()
+    def _evaluate_with_train_graph(
+        self,
+        model,
+        train_loader,
+        val_loader,
+        loss_fn,
+        meta,
+        linear_warmup: bool = False,
+    ) -> float:
+        """Validate with the train-frozen competitor graph, then restore online mode."""
+        selector = getattr(getattr(model, "head", None), "neighbor_selector", None)
+        if selector is None:
+            return self._evaluate_epoch(model, val_loader, loss_fn, meta, linear_warmup)
+
+        prev_pairs = selector.frozen_pairs
+        prev_bonus = selector.frozen_edge_bonus
+        try:
+            self.freeze_graph(model, train_loader, meta)
+            return self._evaluate_epoch(model, val_loader, loss_fn, meta, linear_warmup)
+        finally:
+            # Back to online selection for the next training epoch.
+            selector.frozen_pairs = prev_pairs
+            selector.frozen_edge_bonus = prev_bonus
+
+    def _compute_loss(self, model, batch, loss_fn, meta, linear_warmup: bool = False):
         needs_E = self.config.lambda_elast > 0.0
-        y_hat, _, aux = model(batch, return_parts=True, compute_E=needs_E, meta=meta)
-        return loss_fn(
+        y_hat, _, aux = model(
+            batch,
+            return_parts=True,
+            compute_E=needs_E,
+            meta=meta,
+            linear_warmup=linear_warmup,
+        )
+
+        # Check for non-finite values in the loss components.
+        self._require_finite(y_hat, "y_hat")
+        self._require_finite(aux["beta"], "beta")
+        self._require_finite(aux["w"], "w")
+        self._require_finite(aux["w_cross"], "w_cross")
+        self._require_finite(aux["u"], "u")
+        self._require_finite(aux["Bx"], "Bx")
+        self._require_finite(aux["dBx"], "dBx")
+        self._require_finite(aux["ddBx"], "ddBx")
+
+        loss, logs = loss_fn(
             y_hat,
             batch["demands"],
             batch["obs_mask"],
@@ -186,7 +253,12 @@ class Trainer:
             aux["Bx"],
             aux["pairs"],
             E=aux.get("E"),
+            attn_weights=aux.get("attn_weights"),
         )
+        if not torch.isfinite(loss):
+            raise FloatingPointError(f"non-finite loss: {loss}")
+
+        return loss, logs
 
     # ── Model preparation ───────────────────────────────────────────────────
 
@@ -203,13 +275,20 @@ class Trainer:
         ).to(self.device)
 
     def _build_optimizer(self, model: nn.Module, lr: float) -> torch.optim.Optimizer:
-        # Spline, cross-price and bias parameters are left undecayed: shrinking
-        # them toward zero would flatten the very curvature we want to learn.
+        # Output heads that emit intercept, price slope, splines or cross
+        # terms are left undecayed: shrinking them toward zero flattens the
+        # demand surface. Encoder weights still decay.
         decayed, undecayed = [], []
         for name, param in model.named_parameters():
             if not param.requires_grad:
                 continue
-            if name.endswith("bias") or "head_w" in name or "cross" in name or "spline" in name:
+            if (
+                name.endswith("bias")
+                or "head_b" in name
+                or "head_w" in name
+                or "cross" in name
+                or "spline" in name
+            ):
                 undecayed.append(param)
             else:
                 decayed.append(param)
@@ -221,6 +300,21 @@ class Trainer:
             ],
             lr=lr,
         )
+
+    def _zero_and_freeze(self, module: nn.Linear) -> None:
+        with torch.no_grad():
+            module.weight.zero_()
+            if module.bias is not None:
+                module.bias.zero_()
+        for parameter in module.parameters():
+            parameter.requires_grad = False
+            
+    def _zero_and_freeze_splines(self, model: nn.Module) -> None:
+        head = model.head.param_head
+        self._zero_and_freeze(head.head_w)
+        if head.use_cross:
+            self._zero_and_freeze(head.head_w_cross)
+            self._zero_and_freeze(head.head_cross)
 
     def _freeze_splines(self, model: nn.Module, frozen: bool) -> None:
         head = model.head.param_head
@@ -258,9 +352,23 @@ class Trainer:
             return
 
         model.eval()
-        latents = (model.encode(self._to_device(batch)) for batch in loader)
+        graph_loader = DataLoader(
+            loader.dataset,
+            batch_size=loader.batch_size,
+            shuffle=False,
+            drop_last=False,
+            num_workers=loader.num_workers,
+            pin_memory=loader.pin_memory,
+        )
+        latents = (model.encode(self._to_device(batch)) for batch in graph_loader)
         mean_scores = selector.accumulate_mean_scores(latents, meta=meta)
         selector.freeze_graph(mean_scores, meta=meta)
+
+    def _require_finite(self, tensor: torch.Tensor | None, name: str) -> None:
+        if tensor is None or tensor.numel() == 0:
+            return
+        if not torch.isfinite(tensor).all():
+            raise FloatingPointError(f"non-finite values in {name}")
 
     def _to_device(self, batch: dict) -> dict:
         return {k: v.to(self.device, non_blocking=True) for k, v in batch.items()}
@@ -270,6 +378,13 @@ def resolve_device(device: str) -> torch.device:
     if device == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(device)
+
+def seed_everything(seed: int) -> None: 
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def _inv_softplus(x: float) -> float:

@@ -76,7 +76,7 @@ class SparseNeighborSelector(nn.Module):
         init_style_bonus: float = 0.10,
         init_size_bonus: float = 0.10,
         size_gamma: float = 1.0,
-        same_category_first: bool = True,
+        same_category_first: bool = False,
     ):
         super().__init__()
         self.q_proj = nn.Linear(d_hidden, d_attn, bias=False)
@@ -96,6 +96,11 @@ class SparseNeighborSelector(nn.Module):
         self.register_buffer("frozen_pairs", None)
         self.register_buffer("frozen_edge_bonus", None)
 
+    def _same_known(self, codes: torch.Tensor) -> torch.Tensor:
+        """True iff both ids are knwon (nonzero) and equal."""
+        known = codes != 0
+        return (codes.unsqueeze(0) == codes.unsqueeze(1)) & known.unsqueeze(0) & known.unsqueeze(1)
+
     def _meta_bonus(
         self,
         meta: ProductMetadata | None,
@@ -113,29 +118,30 @@ class SparseNeighborSelector(nn.Module):
         meta = meta.to(device)
 
         if meta.category is not None:
-            same_cat = meta.category.unsqueeze(0) == meta.category.unsqueeze(1)
+            same_cat = self._same_known(meta.category)
         else:
             same_cat = torch.ones(n, n, dtype=torch.bool, device=device)
 
         if meta.brand is not None:
-            same_brand = (meta.brand.unsqueeze(0) == meta.brand.unsqueeze(1)).float()
-            bonus = bonus + F.softplus(self.brand_bonus_raw) * same_brand
+            bonus = bonus + F.softplus(self.brand_bonus_raw) * self._same_known(meta.brand).float()
 
         if meta.style is not None:
-            same_style = (meta.style.unsqueeze(0) == meta.style.unsqueeze(1)).float()
-            bonus = bonus + F.softplus(self.style_bonus_raw) * same_style
+            bonus = bonus + F.softplus(self.style_bonus_raw) * self._same_known(meta.style).float()
 
         if meta.size is not None:
-            # Similarity decays with the distance between sizes in log space.
-            log_size = torch.log(meta.size.float() + 1e-6)
+            size = meta.size.float()
+            known = torch.isfinite(size) & (size > 0)
+            size_safe = torch.where(known, size, torch.ones_like(size))
+            log_size = torch.log(size_safe.clamp(min=1e-6))
             log_dist = (log_size.unsqueeze(0) - log_size.unsqueeze(1)).abs()
-            bonus = bonus + F.softplus(self.size_bonus_raw) * torch.exp(-self.gamma * log_dist)
-
+            similar = torch.exp(-self.gamma * log_dist)
+            similar = similar * known.unsqueeze(0).float() * known.unsqueeze(1).float()
+            bonus = bonus + F.softplus(self.size_bonus_raw) * similar
         return not_self, same_cat, bonus.masked_fill(~not_self, 0.0)
 
     @torch.no_grad()
     def accumulate_mean_scores(self, h_iter, meta: ProductMetadata | None = None) -> torch.Tensor:
-        """Averages the (n, n) score matrix over every batch yielded by ``h_iter``.
+        """Averages the (n, n) score matrix over every observation yielded by ``h_iter``.
 
         The caller is responsible for producing the latent vectors in eval mode
         and without gradients. The result feeds ``freeze_graph``.
@@ -147,14 +153,15 @@ class SparseNeighborSelector(nn.Module):
         for h in h_iter:
             h = h.to(device)
             n = h.shape[1]
+            batch_size = h.shape[0]
             not_self, _, bonus = self._meta_bonus(meta, n, device)
             Q, K = self.q_proj(h), self.k_proj(h)
             scores = torch.bmm(Q, K.transpose(1, 2)) / self.scale
             scores = scores + bonus.unsqueeze(0)
             scores = scores.masked_fill(~not_self.unsqueeze(0), float("-inf"))
-            batch_mean = scores.mean(dim=0)
-            acc = batch_mean if acc is None else acc + batch_mean
-            count += 1
+            batch_sum = scores.sum(dim=0)
+            acc = batch_sum if acc is None else acc + batch_sum
+            count += batch_size
 
         if acc is None or count == 0:
             raise RuntimeError("accumulate_mean_scores received an empty iterator")
@@ -260,3 +267,5 @@ class SparseNeighborSelector(nn.Module):
 
 def _inv_softplus(x: float) -> float:
     return torch.log(torch.expm1(torch.tensor(float(x)))).item()
+
+

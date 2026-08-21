@@ -44,6 +44,7 @@ class ICDN(nn.Module):
         return_parts: bool = False,
         compute_E: bool = False,
         meta: ProductMetadata | None = None,
+        linear_warmup: bool = False,
     ):
         tokens = self.context_builder(batch)
         x = batch["prices"]
@@ -56,6 +57,7 @@ class ICDN(nn.Module):
             dBx=dBx,
             return_E=compute_E,
             meta=meta,
+            linear_warmup=linear_warmup,
         )
 
         if return_parts:

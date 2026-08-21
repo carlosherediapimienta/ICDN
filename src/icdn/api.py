@@ -1,6 +1,8 @@
 """Public interface of the ICDN library."""
 
 from pathlib import Path
+from queue import Empty
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -8,7 +10,7 @@ import torch
 
 from .config import ICDNConfig
 from .data.dataset import DataLoaderFactory, MultiProductDataset
-from .data.features import FeatureBuilder
+from .data.features import LOG_PRICE, FeatureBuilder
 from .data.panel import PanelBuilder, PanelLayout
 from .data.splits import TemporalSplitter
 from .model.context import ProductTokenBuilder
@@ -23,7 +25,7 @@ from .training.metrics import (
     predict_elasticities,
     regression_metrics,
 )
-from .training.trainer import Trainer, resolve_device
+from .training.trainer import Trainer, resolve_device, seed_everything
 
 # Highest log-demand that still converts to a finite level.
 _MAX_LOG_DEMAND = 700.0
@@ -53,6 +55,9 @@ class ICDNModel:
         self._panel_builder: PanelBuilder | None = None
         self._device = resolve_device(self.config.device)
         self._train_panel: pd.DataFrame | None = None
+        self._features: FeatureBuilder | None = None
+        self._train_tail: pd.DataFrame | None = None
+        self._val_panel: pd.DataFrame | None = None
 
     # ── Lifecycle ───────────────────────────────────────────────────────────
 
@@ -73,24 +78,57 @@ class ICDNModel:
         Lags, seasonality and competitive context are engineered internally.
         """
         cfg = self.config
-        features = FeatureBuilder(cfg)
-        long_df = features.run(panel)
 
-        self._panel_builder = PanelBuilder(cfg)
-        wide = self._panel_builder.fit_transform(
-            long_df, features.shared_features, features.product_features
-        )
-        self.layout = self._panel_builder.layout
-
+        # Split the panel RAW
         splitter = TemporalSplitter(period_col=cfg.schema.period)
-        train_wide, val_wide = splitter.single_split(wide, train_frac=1.0 - cfg.validation_fraction)
-        if val_wide.empty:
+        train_raw, val_raw = splitter.single_split(panel, train_frac=1.0 - cfg.validation_fraction)
+        if val_raw.empty:
             raise ValueError(
                 "the panel does not have enough periods to build a validation split. "
                 "Provide more history or lower validation_fraction."
             )
 
-        self._model = self._build_model(train_wide)
+        # Save enough history so lag/rolling features are correct at inference time
+        n_tail = max(list(cfg.lags) + list(cfg.rolling_windows) + [cfg.smoothing_window])
+        _store, _product, _period = cfg.schema.store, cfg.schema.product, cfg.schema.period
+        self._train_tail = (
+            train_raw
+            .sort_values([_store, _product, _period])
+            .groupby([_store, _product], group_keys=False)
+            .tail(n_tail)
+        )
+        
+        # Build the features
+        features = FeatureBuilder(cfg)
+        train_long = features.fit_transform(train_raw)
+
+        # Validation must see train history for lags/rollings
+        period = cfg.schema.period
+        if self._train_tail is not None and not self._train_tail.empty:
+            first_val = val_raw[period].min()
+            tail = self._train_tail[self._train_tail[period] < first_val]
+            val_extended = (
+                pd.concat([tail, val_raw], ignore_index=True) if not tail.empty else val_raw
+            )
+        else:
+            val_extended = val_raw
+
+        val_long   = features.transform(val_extended)
+        val_periods = set(val_raw[period].unique())
+        val_long = val_long[val_long[period].isin(val_periods)].reset_index(drop=True)
+
+        self._features = features
+    
+        # PanelBuilder only ajusted with the train panel
+        self._panel_builder = PanelBuilder(cfg)
+        train_wide = self._panel_builder.fit_transform(
+            train_long, features.shared_features, features.product_features
+        )
+        val_wide = self._panel_builder.transform(val_long)
+        self.layout = self._panel_builder.layout
+
+        seed_everything(cfg.seed)
+        self._model = self._build_model(train_long)
         loaders = self._build_loaders(train_wide, val_wide)
 
         trainer = Trainer(cfg)
@@ -103,13 +141,19 @@ class ICDNModel:
             meta=self.product_metadata(),
         )
         self._train_panel = panel
+        self._val_panel = val_raw
         return self
 
     # ── Inference ───────────────────────────────────────────────────────────
 
-    def predict(self, panel: pd.DataFrame | None = None) -> pd.DataFrame:
-        """Predicts demand for every store, period and product.
-
+    def score(self, panel: pd.DataFrame | None = None) -> pd.DataFrame:
+        """Scores fitted demand on a panel that already has observed units.
+        
+        This is for retrospective evaluation, not a future forecast: every row
+        still needs identifiers, price, promo and strictly positive units.
+        Competitive features are computed from the rows present in ``panel``. A
+        partial panel yields different scores for the same observation.
+        
         Returns a long frame with the identifier columns of your schema plus
         ``predicted_demand``, ``predicted_log_demand`` and, where available,
         the observed demand.
@@ -137,10 +181,16 @@ class ICDNModel:
         Each row reports how the demand of ``product`` responds to the price of
         ``competitor``. Rows where both coincide are own-price elasticities.
 
+        Competitive features are computed from the rows present in ``panel``.
+        Pass every product of interest for each store-period; a partial panel
+        yields different elasticities for the same observation.
+
         Args:
             panel: data to evaluate. Defaults to the training panel.
             aggregate: when True, summarises each store and product pair with
-                its mean, dispersion and a 95% interval across periods. When
+                its mean, standard deviation and 2.5/97.5 temporal percentiles
+                across periods. These are not statistical confidence intervals:
+                they do not retrain, bootstrap or average over seeds. When
                 False, returns one row per observation.
         """
         wide, loader = self._prepare(panel)
@@ -152,18 +202,31 @@ class ICDNModel:
             return rows
 
         schema = self.config.schema
-        grouped = rows.groupby([schema.store, "product", "competitor", "kind"], observed=True)
+        grouped = rows.groupby([schema.store, schema.product, "competitor", "kind"], observed=True)
         summary = grouped["elasticity"].agg(
             elasticity="mean",
             std="std",
-            ci_low=lambda s: s.quantile(0.025),
-            ci_high=lambda s: s.quantile(0.975),
+            temporal_q025=lambda s: s.quantile(0.025),
+            temporal_q975=lambda s: s.quantile(0.975),
             n_obs="size",
         )
         return summary.reset_index()
 
     def evaluate(self, panel: pd.DataFrame | None = None) -> dict[str, float]:
-        """Masked MAE, RMSE and R2 of log-demand on the given panel."""
+        """Masked MAE, RMSE and R2 of log-demand.
+
+        If ``panel`` is omitted, uses the chronological validation split from
+        ``fit()``. That split is not stored in checkpoints: after ``load()``,
+        pass the holdout explicitly.
+    """
+        if panel is None:
+            if self._val_panel is None:
+                raise ValueError(
+                    "no panel supplied and no validation panel available "
+                    "(it is not stored inside checkpoints or not fitted yet). "
+                    "Pass the holdout data explicitly."
+                )
+            panel = self._val_panel
         _, loader = self._prepare(panel)
         y_hat = predict_demand(self._model, loader, self._device, self.product_metadata())
         y_true, mask = collect_targets(loader)
@@ -174,7 +237,20 @@ class ICDNModel:
     def save(self, path: str | Path) -> Path:
         """Writes weights, configuration, layout and encoders to a single file."""
         self._require_fitted()
-        return save_checkpoint(path, self._model, self.config, self.layout)
+        extra = {}
+        if self._features is not None:
+            extra["period_rank_map"] = self._features._period_rank_map
+            extra["max_train_rank"]  = self._features._max_train_rank
+            extra["origin"] = self._features._origin
+            extra["product_first_rank"] = self._features._product_first_rank
+            extra["store_product_first_rank"] = self._features._store_product_first_rank
+            extra["assortment_size"] = self._features._assortment_size
+        if self._panel_builder is not None and self._panel_builder._price_fallback_mean is not None:
+            extra["price_fallback_mean"] = self._panel_builder._price_fallback_mean
+        if self._train_tail is not None:
+            extra["train_tail"] = self._train_tail
+        return save_checkpoint(path, self._model, self.config, self.layout, extra)
+
 
     @classmethod
     def load(cls, path: str | Path) -> "ICDNModel":
@@ -192,6 +268,21 @@ class ICDNModel:
             selector.set_frozen_graph(payload["frozen_pairs"], payload["frozen_edge_bonus"])
         network.load_state_dict(payload["state_dict"])
         model._model = network.to(model._device)
+
+        if payload.get("period_rank_map") is not None:
+            fb = FeatureBuilder(model.config)
+            fb._period_rank_map = payload["period_rank_map"]
+            fb._max_train_rank = payload["max_train_rank"]
+            fb._origin = payload["origin"]
+            fb._product_first_rank = payload["product_first_rank"]
+            fb._store_product_first_rank = payload["store_product_first_rank"]
+            fb._assortment_size = payload["assortment_size"]
+            model._features = fb
+        if payload.get("price_fallback_mean") is not None:
+            model._panel_builder._price_fallback_mean = payload["price_fallback_mean"]
+        if payload.get("train_tail") is not None:
+            model._train_tail = payload["train_tail"]
+
         return model
 
     # ── Internals ───────────────────────────────────────────────────────────
@@ -212,9 +303,23 @@ class ICDNModel:
             size=None if layout.sizes is None else torch.tensor(layout.sizes, dtype=torch.float32),
         )
 
-    def _build_model(self, train_wide: pd.DataFrame) -> ICDN:
-        n = self.layout.n_products
-        prices = train_wide[[f"log_price_{i}" for i in range(n)]].to_numpy()
+    def _build_model(self, train_long: pd.DataFrame) -> ICDN:
+        layout = self.layout
+        schema = self.config.schema
+        products = layout.products
+        
+        prices = (
+            train_long.loc[train_long[schema.product].isin(products)]
+            .pivot_table(
+                index=[schema.period, schema.store],
+                columns=schema.product,
+                values=LOG_PRICE,
+                aggfunc="mean",
+                observed=True,
+            )
+            .reindex(columns=products)
+            .to_numpy(dtype=np.float64)
+        )
         return self._instantiate(spline_prices=prices).to(self._device)
 
     def _instantiate(self, spline_prices: np.ndarray | None) -> ICDN:
@@ -245,8 +350,9 @@ class ICDNModel:
             hidden=cfg.hidden,
             act=cfg.activation,
             dropout=cfg.dropout,
-            enforce_negative_beta=True,
+            enforce_negative_beta=cfg.enforce_negative_beta,
             use_cross=cfg.use_cross,
+            same_category_first=cfg.same_category_first,
         )
         return ICDN(context_builder=tokens, price_splines=splines, head=head, n=n)
 
@@ -271,19 +377,42 @@ class ICDNModel:
 
         if cfg.warmup_epochs > 0:
             loaders["warmup_train"] = factory.train(dataset(self._smooth(train_wide)))
-            loaders["warmup_val"] = factory.evaluate(dataset(self._smooth(val_wide)))
+
+            store, period = cfg.schema.store, cfg.schema.period
+            n_tail = max(list(cfg.lags) + list(cfg.rolling_windows) + [cfg.smoothing_window])
+            train_hist = (
+                train_wide
+                .sort_values([store, period])
+                .groupby(store, group_keys=False)
+                .tail(n_tail)
+            )
+            combined = pd.concat([train_hist, val_wide], ignore_index=True)
+            smoothed = self._smooth(combined)
+            val_keys = val_wide[[store, period]].drop_duplicates()
+            val_smooth = val_keys.merge(smoothed, on=[store, period], how="left")
+            loaders["warmup_val"] = factory.evaluate(dataset(val_smooth))
 
         return loaders
 
     def _smooth(self, wide: pd.DataFrame) -> pd.DataFrame:
         """Replaces demand by a trailing moving average for the warm-up phase."""
         cfg = self.config
-        smoothed = wide.copy()
-        columns = [f"log_demand_{i}" for i in range(self.layout.n_products)]
-        grouped = smoothed.groupby(cfg.schema.store, observed=True)[columns]
-        smoothed[columns] = grouped.transform(
-            lambda s: s.rolling(cfg.smoothing_window, min_periods=1).mean()
-        )
+        store, period = cfg.schema.store, cfg.schema.period
+        window = cfg.smoothing_window
+        smoothed = wide.sort_values([store, period]).copy()
+
+        for i in range(self.layout.n_products):
+            demand_col = f"log_demand_{i}"
+            mask_col = f"obs_mask_{i}"
+            rolled = pd.Series(index=smoothed.index, dtype=np.float64)
+            for _, g in smoothed.groupby(store):
+                series = g[demand_col].where(g[mask_col] > 0)
+                series.index = g[period].astype(int)
+                start, end = int(series.index.min()), int(series.index.max())
+                full = series.reindex(range(start, end + 1))
+                calendar = full.rolling(window, min_periods=1).mean()
+                rolled.loc[g.index] = calendar.reindex(series.index).to_numpy()
+            smoothed[demand_col] = rolled.fillna(0.0)
         return smoothed
 
     def _prepare(self, panel: pd.DataFrame | None):
@@ -296,9 +425,35 @@ class ICDNModel:
                 "(it is not stored inside checkpoints). Pass the data explicitly."
             )
 
-        features = FeatureBuilder(cfg)
-        wide = self._panel_builder.transform(features.run(panel))
+        requested_col = "_is_requested"
+        requested_panel = panel.assign(**{requested_col: True})
+
+        if self._train_tail is not None and not self._train_tail.empty:
+            store, product, period = cfg.schema.store, cfg.schema.product, cfg.schema.period
+            first_by_series = (
+                panel.groupby([store, product], as_index=False)[period]
+                .min()
+                .rename(columns={period: "_first"})
+            )
+            tail = self._train_tail.merge(first_by_series, on=[store, product], how="inner")
+            tail = tail.loc[tail[period] < tail["_first"]].drop(columns=["_first"])
+            if tail.empty:
+                extended, flag = requested_panel, None
+            else:
+                train_tail = tail.assign(**{requested_col: False})
+                extended = pd.concat([train_tail, requested_panel], ignore_index=True)
+                flag = requested_col
+        else:
+            extended, flag = requested_panel, None
+        if self._features is not None:
+            long = self._features.transform(extended, requested_col=flag)
+        else:
+            long = FeatureBuilder(cfg).run(extended, requested_col=flag)
+        wide = self._panel_builder.transform(long)
+        self._warn_prices_outside_spline_support(wide)
+
         dataset = MultiProductDataset(wide, self.layout, period_col=cfg.schema.period)
+
         factory = DataLoaderFactory(
             batch_size=cfg.batch_size,
             num_workers=cfg.num_workers,
@@ -306,18 +461,47 @@ class ICDNModel:
         )
         return wide, factory.evaluate(dataset)
 
+    def _warn_prices_outside_spline_support(self, wide: pd.DataFrame) -> None:
+        """Spline knots cover the central training log-prices;
+        outside that the cubic basis is unconstrained."""
+        splines = self._model.price_splines
+        n = self.layout.n_products
+        lo = (
+            splines.knots.min(dim=1).values * splines.scale + splines.shift
+        ).detach().cpu().numpy()
+        hi = (
+            splines.knots.max(dim=1).values * splines.scale + splines.shift
+        ).detach().cpu().numpy()
+
+        x = wide[[f"log_price_{i}" for i in range(n)]].to_numpy(dtype=np.float64)
+        mask = wide[[f"obs_mask_{i}" for i in range(n)]].to_numpy(dtype=np.float64) > 0
+        below = mask & (x < lo)
+        above = mask & (x > hi)
+        if not (below.any() or above.any()):
+            return
+        warnings.warn(
+            "Some observed log-prices fall outside the training spline knots "
+            "(typically the 5th–95th percentiles of train). "
+            f"Below support: {int(below.sum())} cells; above: {int(above.sum())}. "
+            "Own-price curvature is unconstrained there "
+            "(cubic truncated-power extrapolation). Treat scores and elasticities "
+            "on those cells as provisional.",
+            UserWarning,
+            stacklevel=3,
+        )
+
     def _melt(self, wide: pd.DataFrame, matrices: dict[str, np.ndarray]) -> pd.DataFrame:
         schema = self.config.schema
         products = self.layout.products
         frames = []
         for i, product in enumerate(products):
             block = wide[[schema.store, schema.period]].copy()
-            block["product"] = product
+            block[schema.product] = product
             for name, values in matrices.items():
                 block[name] = values[:, i]
             frames.append(block)
         return pd.concat(frames, ignore_index=True).sort_values(
-            [schema.store, schema.period, "product"], kind="stable"
+            [schema.store, schema.period, schema.product], kind="stable"
         ).reset_index(drop=True)
 
     def _elasticity_rows(
@@ -330,14 +514,16 @@ class ICDNModel:
         products = self.layout.products
         n = len(products)
 
-        selector = self._model.head.neighbor_selector
-        if selector is not None and selector.frozen_pairs is not None:
-            pairs = selector.frozen_pairs.cpu().numpy()
-            cross = list(zip(pairs[0].tolist(), pairs[1].tolist(), strict=True))
-        else:
-            cross = [(i, j) for i in range(n) for j in range(n) if i != j]
-
-        entries = [(i, i, "own") for i in range(n)] + [(i, j, "cross") for i, j in cross]
+        entries = [(i,i, "own") for i in range(n)]
+        
+        if self.config.use_cross:
+            selector = self._model.head.neighbor_selector
+            if selector is not None and selector.frozen_pairs is not None:
+                pairs = selector.frozen_pairs.cpu().numpy()
+                cross = list(zip(pairs[0].tolist(), pairs[1].tolist(), strict=True))
+            else:
+                cross = [(i, j) for i in range(n) for j in range(n) if i != j]
+            entries += [(i, j, "cross") for i, j in cross]
 
         frames = []
         for i, j, kind in entries:
@@ -345,7 +531,7 @@ class ICDNModel:
             if not observed.any():
                 continue
             block = wide.loc[observed, [schema.store, schema.period]].copy()
-            block["product"] = products[i]
+            block[schema.product] = products[i]
             block["competitor"] = products[j]
             block["kind"] = kind
             block["elasticity"] = E[observed, i, j]
@@ -353,16 +539,13 @@ class ICDNModel:
 
         if not frames:
             return pd.DataFrame(
-                columns=[schema.store, schema.period, "product", "competitor", "kind", "elasticity"]
+                columns=[schema.store, schema.period, schema.product, "competitor", "kind", "elasticity"]
             )
         return pd.concat(frames, ignore_index=True)
 
     def _to_levels(self, log_values: pd.Series) -> pd.Series:
-        if self.config.schema.values_are_log:
-            return log_values
-        # Clipping keeps the column finite and non-negative even when an
-        # undertrained model emits extreme values.
-        levels = np.expm1(log_values.astype("float64").clip(upper=_MAX_LOG_DEMAND))
+        # Inverse of log. Clip so an undertrained model cannot emit inf.
+        levels = np.exp(log_values.astype("float64").clip(upper=_MAX_LOG_DEMAND))
         return levels.clip(lower=0.0)
 
     def _require_fitted(self) -> None:

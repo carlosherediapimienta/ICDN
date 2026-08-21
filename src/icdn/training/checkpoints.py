@@ -9,10 +9,15 @@ from pathlib import Path
 
 import torch
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 
-
-def save_checkpoint(path: str | Path, model: torch.nn.Module, config, layout) -> Path:
+def save_checkpoint(
+    path: str | Path,
+    model: torch.nn.Module,
+    config,
+    layout,
+    extra: dict | None = None,
+) -> Path:
     path = _resolve(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -24,6 +29,7 @@ def save_checkpoint(path: str | Path, model: torch.nn.Module, config, layout) ->
         "state_dict": model.state_dict(),
         "frozen_pairs": None if selector is None else selector.frozen_pairs,
         "frozen_edge_bonus": None if selector is None else selector.frozen_edge_bonus,
+        **(extra or {})
     }
     torch.save(payload, path)
     return path

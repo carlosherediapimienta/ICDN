@@ -7,15 +7,22 @@ import torch.nn as nn
 class ProductTokenBuilder(nn.Module):
     """Builds one context token per product from a batch.
 
-    Each token concatenates features shared by the whole observation (store
-    embedding, seasonality, promotional pressure) with the features specific
-    to the product (lags, rolling means, competitive context, brand and style
-    embeddings)::
-
-        token_i = [store_emb | shared | brand_emb_i | style_emb_i | product_feats_i]
-
+    Ech token concatenates features shared by the whole observation (store
+    embedding, seasonality, promotional pressure) and features specific to the
+    product (lags, rolling means, competitive context, brand and style
+    embeddings):
+        token_i = [
+            store_emb |
+            shared |
+            brand_emb_i |
+            style_emb_i |
+            product_feats_i
+        ]
     The number of shared and per-product features is passed explicitly so the
-    module stays independent of any particular column list.
+    module stays independent of any particular column list. 
+
+    Recall that the hetereogeniety of the product is captured by:
+     Heterogeneity = specific features + specific state + specific spline basis
     """
 
     def __init__(
@@ -52,6 +59,8 @@ class ProductTokenBuilder(nn.Module):
 
     def forward(self, batch: dict) -> torch.Tensor:
         """Returns the context tokens with shape (B, n, d_token)."""
+        B = batch["ids"].shape[0]
+
         store_emb = self.emb_store(batch["ids"][:, 0])
         shared = torch.cat([store_emb, batch["shared_feats"]], dim=1)
         shared = shared.unsqueeze(1).expand(-1, self.n, -1)
@@ -59,7 +68,10 @@ class ProductTokenBuilder(nn.Module):
         brand_emb = self.emb_brand(batch["product_cat"][:, :, 0])
         style_emb = self.emb_style(batch["product_cat"][:, :, 1])
 
-        return torch.cat([shared, brand_emb, style_emb, batch["product_feats"]], dim=-1)
+        return torch.cat(
+            [shared, brand_emb, style_emb, batch["product_feats"]],
+            dim=-1
+        )
 
 
 class SharedProductEncoder(nn.Module):

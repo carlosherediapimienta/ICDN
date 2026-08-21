@@ -53,7 +53,7 @@ class DemandParameterHead(nn.Module):
 
         self.register_buffer("_pairs", pairs)
 
-    def run(self, h: torch.Tensor, pairs: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
+    def run(self, h: torch.Tensor, pairs: torch.Tensor | None = None, linear_warmup: bool = False) -> dict[str, torch.Tensor]:
         B, _, _ = h.shape
         K = self.K_splines
         active_pairs = pairs if pairs is not None else self._pairs
@@ -64,7 +64,11 @@ class DemandParameterHead(nn.Module):
         # lowers demand. The splines can still bend the curve locally, so this
         # constrains the baseline slope rather than the elasticity itself.
         beta = -F.softplus(beta_raw) if self.enforce_negative_beta else beta_raw
-        w = self.head_w(h)
+        w = (
+            torch.zeros(B, self.n, K, device=h.device, dtype=h.dtype)
+            if linear_warmup
+            else self.head_w(h)
+        )
 
         if self.use_cross:
             i_idx, j_idx = active_pairs[0], active_pairs[1]
@@ -72,8 +76,12 @@ class DemandParameterHead(nn.Module):
             h_ij = torch.cat([h[:, i_idx, :], h[:, j_idx, :]], dim=-1)
 
             beta_cross = self.head_beta_cross(h_ij).squeeze(-1)
-            w_cross = self.head_w_cross(h_ij)
-            u = self.head_cross(h_ij).view(B, n_active, K, K)
+            if linear_warmup:
+                w_cross = torch.zeros(B, n_active, K, device=h.device, dtype=h.dtype)
+                u = torch.zeros(B, n_active, K, K, device=h.device, dtype=h.dtype)
+            else: 
+                w_cross = self.head_w_cross(h_ij)
+                u = self.head_cross(h_ij).view(B, n_active, K, K)
         else:
             beta_cross = torch.empty(B, 0, device=h.device, dtype=h.dtype)
             w_cross = torch.empty(B, 0, K, device=h.device, dtype=h.dtype)
@@ -111,6 +119,7 @@ class IntegrableDemandHead(nn.Module):
         dropout: float = 0.0,
         enforce_negative_beta: bool = False,
         use_cross: bool = True,
+        same_category_first: bool = False,
     ):
         super().__init__()
         self.encoder = SharedProductEncoder(context_dim, hidden=hidden, act=act, dropout=dropout)
@@ -125,7 +134,7 @@ class IntegrableDemandHead(nn.Module):
         )
         self.demand_calc = DemandCalculator()
         self.neighbor_selector = (
-            SparseNeighborSelector(d_hidden=hidden_dim, k_neighbors=k_neighbors)
+            SparseNeighborSelector(d_hidden=hidden_dim, k_neighbors=k_neighbors, same_category_first=same_category_first)
             if use_cross
             else None
         )
@@ -138,6 +147,7 @@ class IntegrableDemandHead(nn.Module):
         dBx: torch.Tensor,
         return_E: bool = False,
         meta: ProductMetadata | None = None,
+        linear_warmup: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
         h = self.encoder(tokens)
 
@@ -145,7 +155,7 @@ class IntegrableDemandHead(nn.Module):
         if self.neighbor_selector is not None:
             pairs, attn_weights = self.neighbor_selector.run(h, meta=meta)
 
-        params = self.param_head.run(h, pairs=pairs)
+        params = self.param_head.run(h, pairs=pairs, linear_warmup=linear_warmup)
 
         y_hat, eps_hat, E = self.demand_calc.run(
             b=params["b"],
@@ -161,6 +171,8 @@ class IntegrableDemandHead(nn.Module):
             attn_weights=attn_weights,
             return_E=return_E,
         )
+        
+        params["attn_weights"] = attn_weights
         if return_E and E is not None:
             params["E"] = E
         return y_hat, eps_hat, params

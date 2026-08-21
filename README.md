@@ -5,7 +5,7 @@ Integrable Context-Dependent Demand Network.
 
 The model fits a single smooth log-demand surface conditioned on store,
 calendar, promotional and competitive context, and reads own- and cross-price
-elasticities off its derivatives. Prediction and elasticity estimation
+elasticities off its derivatives. Elasticity estimation
 therefore come from the same fitted object instead of separate regressions.
 
 ## Install
@@ -33,13 +33,13 @@ model = ICDNModel(ICDNConfig(n_products=5))
 model.fit(panel)
 
 elasticities = model.elasticities()
-predictions = model.predict(panel)
+scored = model.score(panel)
 model.save("artifacts/icdn")
 ```
 
 `elasticities()` returns one row per store and product pair:
 
-| store_code | product | competitor | kind | elasticity | ci_low | ci_high |
+| store_code | product | competitor | kind | elasticity | temporal_q025 | temporal_q975 |
 |---|---|---|---|---|---|---|
 | S1 | P1 | P1 | own | -2.14 | -2.42 | -1.88 |
 | S1 | P1 | P2 | cross | 0.37 | 0.19 | 0.55 |
@@ -62,8 +62,8 @@ config = ICDNConfig(
         price="avg_price",
         units="qty",
         promo="promo_flag",
-        category="category",   # optional, restricts who competes with whom
-        brand="brand",         # optional, biases competitor selection
+        category="category",   # optional
+        brand="brand",         # optional
     ),
     n_products=10,
 )
@@ -73,7 +73,7 @@ config = ICDNConfig(
 
 ```bash
 icdn fit --data panel.parquet --config configs/default.yaml --out artifacts/model.icdn
-icdn predict --model artifacts/model.icdn --data panel.parquet --out predictions.csv
+icdn score --model artifacts/model.icdn --data panel.parquet --out scores.csv
 icdn elasticities --model artifacts/model.icdn --data panel.parquet --out elasticities.csv
 ```
 
@@ -91,3 +91,16 @@ pip install icdn
 ## License
 
 See [LICENSE](LICENSE).
+
+## Citation
+If you use this software in your research, please cite:
+> Heredia, C., & Roncel, D. (2026). *Integrable Elasticity via Neural Demand Potentials*. arXiv:2605.22820.  
+> https://arxiv.org/abs/2605.22820
+```bibtex
+@article{heredia2026integrable,
+  title   = {Integrable Elasticity via Neural Demand Potentials},
+  author  = {Heredia, Carlos and Roncel, Daniel},
+  journal = {arXiv preprint arXiv:2605.22820},
+  year    = {2026},
+  url     = {https://arxiv.org/abs/2605.22820}
+}

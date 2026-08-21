@@ -73,6 +73,7 @@ class PanelBuilder:
         self.config = config
         self.schema = config.schema
         self.layout: PanelLayout | None = None
+        self._price_fallback_mean: pd.Series | None = None
 
     # ── Fit ─────────────────────────────────────────────────────────────────
 
@@ -100,6 +101,8 @@ class PanelBuilder:
         )
         self._attach_metadata(filtered, layout)
         self.layout = layout
+        price_pivot = self._pivot(filtered, LOG_PRICE, products)
+        self._price_fallback_mean = price_pivot.mean()
         return self
 
     def _select_products(self, df: pd.DataFrame) -> list:
@@ -141,14 +144,35 @@ class PanelBuilder:
         kept = set(coverage[coverage >= self.config.min_coverage].index)
         df = df[df[product].isin(kept)].copy()
 
-        min_products = self.config.min_products or len(kept)
-        counts = df.groupby([store, period])[product].nunique()
-        dense = counts[counts >= min_products].index
-        return df.set_index([store, period]).loc[lambda d: d.index.isin(dense)].reset_index()
+        if self.config.min_products is not None:
+            counts = df.groupby([store, period])[product].nunique()
+            dense = counts[counts >= self.config.min_products].index
+            df = (
+                df.set_index([store, period])
+                .loc[lambda d: d.index.isin(dense)]
+                .reset_index()
+            )
+        return df
 
     def _attach_metadata(self, df: pd.DataFrame, layout: PanelLayout) -> None:
         """Freezes the static attributes of each product position."""
         product = self.schema.product
+
+        static_cols = [
+            c for c in (self.schema.brand, self.schema.style, self.schema.category, self.schema.size)
+            if c is not None and c in df.columns
+        ]
+        if static_cols:
+            n_values = df.groupby(product, observed=True)[static_cols].nunique(dropna=False)
+            bad = n_values[(n_values > 1).any(axis=1)]
+            if not bad.empty:
+                sku = bad.index[0]
+                cols = [c for c in static_cols if int(bad.loc[sku, c]) > 1]
+                raise ValueError(
+                    f"product {sku!r} has inconsistent static metadata in {cols}. "
+                    "Brand, style, category and size must be constant per SKU."
+                )
+
         static = df.drop_duplicates(subset=[product]).set_index(product)
 
         def codes_for(column: str | None, reserve_zero: bool) -> tuple[list[int] | None, int]:
@@ -160,11 +184,11 @@ class PanelBuilder:
 
         layout.brand_codes, layout.n_brands = codes_for(self.schema.brand, reserve_zero=True)
         layout.style_codes, layout.n_styles = codes_for(self.schema.style, reserve_zero=True)
-        layout.category_codes, _ = codes_for(self.schema.category, reserve_zero=False)
+        layout.category_codes, _ = codes_for(self.schema.category, reserve_zero=True)
 
         if self.schema.size is not None and self.schema.size in static.columns:
             sizes = pd.to_numeric(static.loc[layout.products, self.schema.size], errors="coerce")
-            layout.sizes = sizes.fillna(1.0).astype(float).tolist()
+            layout.sizes = sizes.astype(float).tolist()
 
     # ── Transform ───────────────────────────────────────────────────────────
 
@@ -181,11 +205,31 @@ class PanelBuilder:
         if df.empty:
             raise ValueError("none of the modelled products appear in this panel")
 
+        if self.config.min_products is not None:
+            counts = df.groupby([store, period])[product].nunique()
+            dense = counts[counts >= self.config.min_products].index
+            df = (
+                df.set_index([store, period])
+                .loc[lambda d: d.index.isin(dense)]
+                .reset_index()
+            )
+            if df.empty:
+                raise ValueError(
+                    "no store-period has at least min_products modelled products"
+                )
+
         price = self._pivot(df, LOG_PRICE, products)
         # Prices must exist for every position, so gaps are carried forward and
         # backward inside each store before falling back to the column mean.
         price = price.groupby(level=0, group_keys=False).apply(lambda g: g.ffill().bfill())
-        price = price.fillna(price.mean())
+        fallback = self._price_fallback_mean if self._price_fallback_mean is not None else price.mean()
+        price = price.fillna(fallback)
+        if price.isna().any().any():
+            missing = price.columns[price.isna().all()].tolist()
+            raise ValueError(
+                f"no finite fallback price for products {missing}. "
+                "Fit the model on data that includes them, or pass those products in the panel."
+            )
         price.columns = [f"log_price_{i}" for i in range(n)]
 
         demand = self._pivot(df, LOG_DEMAND, products)

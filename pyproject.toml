@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "icdn"
-version = "0.1.0"
+version = "1.0.0"
 description = "Demand and price elasticity estimation with integrable context-dependent demand networks"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,7 +14,7 @@ authors = [
 ]
 keywords = ["elasticity", "demand", "pricing", "deep-learning"]
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 4 - Beta",
   "Intended Audience :: Science/Research",
   "License :: OSI Approved :: Apache Software License",
   "Programming Language :: Python :: 3",
@@ -22,8 +22,8 @@ classifiers = [
 ]
 dependencies = [
   "numpy>=1.24",
-  "pandas>=2.0",
-  "torch>=2.0",
+  "pandas>=2.1",
+  "torch>=2.3",
   "pyyaml>=6.0",
 ]
 

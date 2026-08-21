@@ -12,5 +12,5 @@ Typical use::
 from .api import ICDNModel
 from .config import ICDNConfig, PanelSchema
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
 __all__ = ["ICDNConfig", "ICDNModel", "PanelSchema", "__version__"]
