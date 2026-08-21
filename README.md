@@ -5,7 +5,7 @@ Integrable Context-Dependent Demand Network.
 
 The model fits a single smooth log-demand surface conditioned on store,
 calendar, promotional and competitive context, and reads own- and cross-price
-elasticities off its derivatives. Prediction and elasticity estimation
+elasticities off its derivatives. Elasticity estimation
 therefore come from the same fitted object instead of separate regressions.
 
 ## Install
@@ -33,7 +33,7 @@ model = ICDNModel(ICDNConfig(n_products=5))
 model.fit(panel)
 
 elasticities = model.elasticities()
-predictions = model.predict(panel)
+scored = model.score(panel)
 model.save("artifacts/icdn")
 ```
 
@@ -73,7 +73,7 @@ config = ICDNConfig(
 
 ```bash
 icdn fit --data panel.parquet --config configs/default.yaml --out artifacts/model.icdn
-icdn predict --model artifacts/model.icdn --data panel.parquet --out predictions.csv
+icdn score --model artifacts/model.icdn --data panel.parquet --out scores.csv
 icdn elasticities --model artifacts/model.icdn --data panel.parquet --out elasticities.csv
 ```
 

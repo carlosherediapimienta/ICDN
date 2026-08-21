@@ -2,7 +2,20 @@ import pandas as pd
 import pytest
 
 from icdn import ICDNModel
+from icdn.data import TemporalSplitter
 
+def test_evaluate_defaults_to_validation_split(panel, config):
+    model = ICDNModel(config).fit(panel)
+    period = config.schema.period
+    _, val_raw = TemporalSplitter(period_col=period).single_split(
+        panel, train_frac=1.0 - config.validation_fraction
+    )
+    default = model.evaluate()
+    holdout = model.evaluate(val_raw)
+    full = model.evaluate(panel)
+
+    assert default == holdout
+    assert full["n_obs"] > default["n_obs"]
 
 def test_fit_reports_both_training_phases(panel, config):
     model = ICDNModel(config).fit(panel)
@@ -11,15 +24,14 @@ def test_fit_reports_both_training_phases(panel, config):
     assert set(model.history) == {"warmup", "main"}
     assert len(model.products) == 4
 
-
-def test_predict_returns_one_row_per_store_period_and_product(panel, config):
+def test_score_returns_one_row_per_store_period_and_product(panel, config):
     model = ICDNModel(config).fit(panel)
-    predictions = model.predict()
+    scored = model.score()
 
     expected = [config.schema.store, config.schema.period, config.schema.product, "predicted_demand"]
-    assert set(expected) <= set(predictions.columns)
-    assert predictions["predicted_demand"].notna().all()
-    assert predictions[config.schema.product].nunique() == 4
+    assert set(expected) <= set(scored.columns)
+    assert scored["predicted_demand"].notna().all()
+    assert scored[config.schema.product].nunique() == 4
 
 def test_elasticities_omit_cross_when_use_cross_is_false(panel, config):
     config.use_cross = False
@@ -58,26 +70,26 @@ def test_evaluate_reports_masked_regression_metrics(panel, config):
     assert metrics["n_obs"] > 0
 
 
-def test_saved_and_reloaded_model_predicts_identically(panel, config, tmp_path):
+def test_saved_and_reloaded_model_scores_identically(panel, config, tmp_path):
     model = ICDNModel(config).fit(panel)
-    before = model.predict(panel)
+    before = model.score(panel)
 
     path = model.save(tmp_path / "model")
     restored = ICDNModel.load(path)
-    after = restored.predict(panel)
+    after = restored.score(panel)
 
     pd.testing.assert_frame_equal(before, after)
     assert restored.products == model.products
 
 
-def test_predict_without_data_after_loading_is_explicit(panel, config, tmp_path):
+def test_score_without_data_after_loading_is_explicit(panel, config, tmp_path):
     model = ICDNModel(config).fit(panel)
     restored = ICDNModel.load(model.save(tmp_path / "model"))
 
     with pytest.raises(ValueError, match="no panel supplied"):
-        restored.predict()
+        restored.score()
 
 
 def test_using_the_model_before_fitting_fails_clearly(config):
     with pytest.raises(RuntimeError, match="not fitted"):
-        ICDNModel(config).predict()
+        ICDNModel(config).score()

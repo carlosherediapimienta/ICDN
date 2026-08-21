@@ -56,6 +56,7 @@ class ICDNModel:
         self._train_panel: pd.DataFrame | None = None
         self._features: FeatureBuilder | None = None
         self._train_tail: pd.DataFrame | None = None
+        self._val_panel: pd.DataFrame | None = None
 
     # ── Lifecycle ───────────────────────────────────────────────────────────
 
@@ -139,17 +140,18 @@ class ICDNModel:
             meta=self.product_metadata(),
         )
         self._train_panel = panel
+        self._val_panel = val_raw
         return self
 
     # ── Inference ───────────────────────────────────────────────────────────
 
-    def predict(self, panel: pd.DataFrame | None = None) -> pd.DataFrame:
-        """Predicts demand for every store, period and product.
-
-        Competitive features (neighbour counts, promo intensity, assortment size)
-        are computed from the rows present in ``panel``. Pass every product of
-        interest for each store-period; a partial panel yields different
-        predictions for the same observation.
+    def score(self, panel: pd.DataFrame | None = None) -> pd.DataFrame:
+        """Scores fitted demand on a panel that already has observed units.
+        
+        This is for retrospective evaluation, not a future forecast: every row
+        still needs identifiers, price, promo and strictly positive units.
+        Competitive features are computed from the rows present in ``panel``. A
+        partial panel yields different scores for the same observation.
         
         Returns a long frame with the identifier columns of your schema plus
         ``predicted_demand``, ``predicted_log_demand`` and, where available,
@@ -210,13 +212,20 @@ class ICDNModel:
         return summary.reset_index()
 
     def evaluate(self, panel: pd.DataFrame | None = None) -> dict[str, float]:
-        """Masked MAE, RMSE and R2 of log-demand on the given panel.
+        """Masked MAE, RMSE and R2 of log-demand.
 
-        Competitive features are computed from the rows present in ``panel``.
-        Pass every product of interest for each store-period; a partial panel
-        yields different predictions, and therefore different metrics, for
-        the same observation.
-        """
+        If ``panel`` is omitted, uses the chronological validation split from
+        ``fit()``. That split is not stored in checkpoints: after ``load()``,
+        pass the holdout explicitly.
+    """
+        if panel is None:
+            if self._val_panel is None:
+                raise ValueError(
+                    "no panel supplied and no validation panel available "
+                    "(it is not stored inside checkpoints or not fitted yet). "
+                    "Pass the holdout data explicitly."
+                )
+            panel = self._val_panel
         _, loader = self._prepare(panel)
         y_hat = predict_demand(self._model, loader, self._device, self.product_metadata())
         y_true, mask = collect_targets(loader)
@@ -341,7 +350,7 @@ class ICDNModel:
             hidden=cfg.hidden,
             act=cfg.activation,
             dropout=cfg.dropout,
-            enforce_negative_beta=True,
+            enforce_negative_beta=cfg.enforce_negative_beta,
             use_cross=cfg.use_cross,
             same_category_first=cfg.same_category_first,
         )

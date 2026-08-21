@@ -1,4 +1,4 @@
-"""Command line interface: ``icdn fit | predict | elasticities``."""
+"""Command line interface: ``icdn fit | score | elasticities``."""
 
 import argparse
 import sys
@@ -20,7 +20,7 @@ def main(argv: list[str] | None = None) -> int:
     fit.add_argument("--out", required=True, help="destination of the trained model")
 
     for name, help_text in [
-        ("predict", "predict demand with a trained model"),
+        ("score", "score fitted demand on a panel with observed units"),
         ("elasticities", "estimate elasticities with a trained model"),
     ]:
         command = subcommands.add_parser(name, help=help_text)
@@ -39,7 +39,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     model = ICDNModel.load(args.model)
-    result = model.predict(panel) if args.command == "predict" else model.elasticities(panel)
+    result = model.score(panel) if args.command == "score" else model.elasticities(panel)
     write_table(result, args.out)
     print(f"{len(result)} rows written to {args.out}")
     return 0

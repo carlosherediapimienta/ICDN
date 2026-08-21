@@ -50,7 +50,7 @@ The model works on a fixed set of `n_products` positions. When
 `n_products` is set, ICDN greedily picks the products that share the densest
 store-period overlap, then drops any product observed in fewer than
 `min_coverage` of the store-period cells. Position `i` maps to
-`model.products[i]` and stays stable across predictions and checkpoints.
+`model.products[i]` and stays stable across scoring and checkpoints.
 
 Cross-price parameters grow with the square of the number of products, so
 start around five to ten and grow from there.
@@ -111,6 +111,7 @@ its mean, standard deviation and percentiles 2.5/97.5 across periods (not a conf
 ```python
 path = model.save("artifacts/icdn")
 restored = ICDNModel.load(path)
+restored.score(new_panel)
 restored.elasticities(new_panel)
 ```
 

@@ -90,6 +90,7 @@ class ICDNConfig:
     d_brand: int = 8
     d_style: int = 8
     use_cross: bool = True
+    enforce_negative_beta: bool = True
     same_category_first: bool = False
 
     # ── Objective ───────────────────────────────────────────────────────────
