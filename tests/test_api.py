@@ -4,6 +4,13 @@ import pytest
 from icdn import ICDNModel
 from icdn.data import TemporalSplitter
 
+def test_score_warns_when_price_is_outside_spline_knots(panel, config):
+    model = ICDNModel(config).fit(panel)
+    extreme = panel.copy()
+    extreme[config.schema.price] = extreme[config.schema.price] * 50
+    with pytest.warns(UserWarning, match="outside the training spline knots"):
+        model.score(extreme)
+
 def test_evaluate_defaults_to_validation_split(panel, config):
     model = ICDNModel(config).fit(panel)
     period = config.schema.period

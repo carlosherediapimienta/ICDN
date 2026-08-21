@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from queue import Empty
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -434,6 +435,7 @@ class ICDNModel:
         # Drop tail rows — keep only the periods the caller requested
         requested = set(panel[cfg.schema.period].unique())
         wide = wide[wide[cfg.schema.period].isin(requested)].reset_index(drop=True)
+        self._warn_prices_outside_spline_support(wide)
 
         dataset = MultiProductDataset(wide, self.layout, period_col=cfg.schema.period)
 
@@ -443,6 +445,35 @@ class ICDNModel:
             pin_memory=self._device.type == "cuda",
         )
         return wide, factory.evaluate(dataset)
+
+    def _warn_prices_outside_spline_support(self, wide: pd.DataFrame) -> None:
+        """Spline knots cover the central training log-prices;
+        outside that the cubic basis is unconstrained."""
+        splines = self._model.price_splines
+        n = self.layout.n_products
+        lo = (
+            splines.knots.min(dim=1).values * splines.scale + splines.shift
+        ).detach().cpu().numpy()
+        hi = (
+            splines.knots.max(dim=1).values * splines.scale + splines.shift
+        ).detach().cpu().numpy()
+
+        x = wide[[f"log_price_{i}" for i in range(n)]].to_numpy(dtype=np.float64)
+        mask = wide[[f"obs_mask_{i}" for i in range(n)]].to_numpy(dtype=np.float64) > 0
+        below = mask & (x < lo)
+        above = mask & (x > hi)
+        if not (below.any() or above.any()):
+            return
+        warnings.warn(
+            "Some observed log-prices fall outside the training spline knots "
+            "(typically the 5th–95th percentiles of train). "
+            f"Below support: {int(below.sum())} cells; above: {int(above.sum())}. "
+            "Own-price curvature is unconstrained there "
+            "(cubic truncated-power extrapolation). Treat scores and elasticities "
+            "on those cells as provisional.",
+            UserWarning,
+            stacklevel=3,
+        )
 
     def _melt(self, wide: pd.DataFrame, matrices: dict[str, np.ndarray]) -> pd.DataFrame:
         schema = self.config.schema
