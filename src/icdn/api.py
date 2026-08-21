@@ -375,17 +375,22 @@ class ICDNModel:
     def _smooth(self, wide: pd.DataFrame) -> pd.DataFrame:
         """Replaces demand by a trailing moving average for the warm-up phase."""
         cfg = self.config
-        smoothed = wide.copy()
-        store = cfg.schema.store
+        store, period = cfg.schema.store, cfg.schema.period
+        window = cfg.smoothing_window
+        smoothed = wide.sort_values([store, period]).copy()
+
         for i in range(self.layout.n_products):
             demand_col = f"log_demand_{i}"
             mask_col = f"obs_mask_{i}"
-            observed = smoothed[demand_col].where(smoothed[mask_col] > 0)
-            smoothed[demand_col] = (
-                observed.groupby(smoothed[store], observed=True)
-                .transform(lambda s: s.rolling(cfg.smoothing_window, min_periods=1).mean())
-                .fillna(0.0)
-            )
+            rolled = pd.Series(index=smoothed.index, dtype=np.float64)
+            for _, g in smoothed.groupby(store):
+                series = g[demand_col].where(g[mask_col] > 0)
+                series.index = g[period].astype(int)
+                start, end = int(series.index.min()), int(series.index.max())
+                full = series.reindex(range(start, end + 1))
+                calendar = full.rolling(window, min_periods=1).mean()
+                rolled.loc[g.index] = calendar.reindex(series.index).to_numpy()
+            smoothed[demand_col] = rolled.fillna(0.0)
         return smoothed
 
     def _prepare(self, panel: pd.DataFrame | None):

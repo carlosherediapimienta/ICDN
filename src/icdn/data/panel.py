@@ -157,6 +157,22 @@ class PanelBuilder:
     def _attach_metadata(self, df: pd.DataFrame, layout: PanelLayout) -> None:
         """Freezes the static attributes of each product position."""
         product = self.schema.product
+
+        static_cols = [
+            c for c in (self.schema.brand, self.schema.style, self.schema.category, self.schema.size)
+            if c is not None and c in df.columns
+        ]
+        if static_cols:
+            n_values = df.groupby(product, observed=True)[static_cols].nunique(dropna=False)
+            bad = n_values[(n_values > 1).any(axis=1)]
+            if not bad.empty:
+                sku = bad.index[0]
+                cols = [c for c in static_cols if int(bad.loc[sku, c]) > 1]
+                raise ValueError(
+                    f"product {sku!r} has inconsistent static metadata in {cols}. "
+                    "Brand, style, category and size must be constant per SKU."
+                )
+
         static = df.drop_duplicates(subset=[product]).set_index(product)
 
         def codes_for(column: str | None, reserve_zero: bool) -> tuple[list[int] | None, int]:
@@ -172,7 +188,7 @@ class PanelBuilder:
 
         if self.schema.size is not None and self.schema.size in static.columns:
             sizes = pd.to_numeric(static.loc[layout.products, self.schema.size], errors="coerce")
-            layout.sizes = sizes.fillna(1.0).astype(float).tolist()
+            layout.sizes = sizes.astype(float).tolist()
 
     # ── Transform ───────────────────────────────────────────────────────────
 
