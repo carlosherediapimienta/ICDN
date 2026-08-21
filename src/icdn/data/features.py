@@ -66,7 +66,7 @@ class FeatureBuilder:
             if (size < 0).any():
                 raise ValueError(f"{schema.size} must be non-negative")
 
-    def run(self, panel: pd.DataFrame) -> pd.DataFrame:
+    def run(self, panel: pd.DataFrame, requested_col: str | None = None) -> pd.DataFrame:
         self._validate_panel(panel)
         schema = self.schema
 
@@ -81,10 +81,18 @@ class FeatureBuilder:
         df = self._add_calendar(df)
         df = self._add_lifecycle(df)
         df = self._add_lags_and_rollings(df)
+
+        if requested_col is not None:
+            df = (
+                df.loc[df[requested_col].astype(bool)]
+                .drop(columns=[requested_col])
+                .reset_index(drop=True)
+            )
+
         df = self._add_promo(df)
         df = self._add_competitive(df)
         df = self._add_static_attributes(df)
-
+        
         return df
 
     def fit(self, panel: pd.DataFrame) -> "FeatureBuilder":
@@ -126,10 +134,10 @@ class FeatureBuilder:
         self.fit(panel)
         return self.run(panel)
 
-    def transform(self, panel: pd.DataFrame) -> pd.DataFrame:
+    def transform(self, panel: pd.DataFrame, requested_col: str | None = None,) -> pd.DataFrame:
         if self._origin is None:
             raise RuntimeError("FeatureBuilder.transform called before fit")
-        return self.run(panel)
+        return self.run(panel, requested_col=requested_col)
 
     # ── Targets ─────────────────────────────────────────────────────────────
 

@@ -4,6 +4,57 @@ import pytest
 from icdn import ICDNModel
 from icdn.data import TemporalSplitter
 
+def test_prepare_keeps_requested_store_product_period_support(panel, config):
+    """The train tail must not reappear as current observations.
+    Filtering the engineered panel by requested *periods* is not enough:
+    another series' tail can share a period the caller asked for on a
+    different store or product.
+    """
+    model = ICDNModel(config).fit(panel)
+    schema = config.schema
+    store, product, period = schema.store, schema.product, schema.period
+
+    # Last training weeks are what _train_tail actually contains.
+    early, late = 40, 45
+    a, b = "P0", "P1"
+    s0, s1 = "S0", "S1"
+
+    # Case 1: same product, two stores, staggered periods.
+    # Old code kept (S1, P0, 40) from S1's tail because 40 is a requested period.
+    staggered = panel[
+        ((panel[store] == s0) & (panel[product] == a) & (panel[period] == early))
+        | ((panel[store] == s1) & (panel[product] == a) & (panel[period] == late))
+    ]
+    wide, _ = model._prepare(staggered)
+    i_a = model.layout.products.index(a)
+    observed = {
+        (row[store], model.layout.products[i], row[period])
+        for _, row in wide.iterrows()
+        for i in range(model.layout.n_products)
+        if row[f"obs_mask_{i}"] > 0
+    }
+    assert observed == {(s0, a, early), (s1, a, late)}
+    assert (s1, early) not in set(zip(wide[store], wide[period], strict=True))
+
+    # Case 2: same store, two products, staggered periods.
+    # Old code set obs_mask of B at week 40 and counted B as a neighbor of A.
+    same_store = panel[
+        ((panel[store] == s0) & (panel[product] == a) & (panel[period] == early))
+        | ((panel[store] == s0) & (panel[product] == b) & (panel[period] == late))
+    ]
+    wide, _ = model._prepare(same_store)
+    i_b = model.layout.products.index(b)
+    early_row = wide[(wide[store] == s0) & (wide[period] == early)].iloc[0]
+    assert early_row[f"obs_mask_{i_a}"] == 1.0
+    assert early_row[f"obs_mask_{i_b}"] == 0.0
+    assert early_row[f"n_neighbors_{i_a}"] == 0.0
+
+    late_row = wide[(wide[store] == s0) & (wide[period] == late)].iloc[0]
+    assert late_row[f"obs_mask_{i_b}"] == 1.0
+    assert late_row[f"miss_lag_1_{i_b}"] == 0.0  # tail still feeds history
+
+    assert model.evaluate(same_store)["n_obs"] == 2
+
 def test_score_warns_when_price_is_outside_spline_knots(panel, config):
     model = ICDNModel(config).fit(panel)
     extreme = panel.copy()

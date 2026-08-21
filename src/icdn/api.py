@@ -413,7 +413,9 @@ class ICDNModel:
                 "(it is not stored inside checkpoints). Pass the data explicitly."
             )
 
-        # Prepend the training tail so lag/rolling windows cross the train boundary
+        requested_col = "_is_requested"
+        requested_panel = panel.assign(**{requested_col: True})
+
         if self._train_tail is not None and not self._train_tail.empty:
             store, product, period = cfg.schema.store, cfg.schema.product, cfg.schema.period
             first_by_series = (
@@ -423,18 +425,19 @@ class ICDNModel:
             )
             tail = self._train_tail.merge(first_by_series, on=[store, product], how="inner")
             tail = tail.loc[tail[period] < tail["_first"]].drop(columns=["_first"])
-            extended = pd.concat([tail, panel], ignore_index=True) if not tail.empty else panel
+            if tail.empty:
+                extended, flag = requested_panel, None
+            else:
+                train_tail = tail.assign(**{requested_col: False})
+                extended = pd.concat([train_tail, requested_panel], ignore_index=True)
+                flag = requested_col
         else:
-            extended = panel
-
+            extended, flag = requested_panel, None
         if self._features is not None:
-            wide = self._panel_builder.transform(self._features.transform(extended))
+            long = self._features.transform(extended, requested_col=flag)
         else:
-            wide = self._panel_builder.transform(FeatureBuilder(cfg).run(extended))
-
-        # Drop tail rows — keep only the periods the caller requested
-        requested = set(panel[cfg.schema.period].unique())
-        wide = wide[wide[cfg.schema.period].isin(requested)].reset_index(drop=True)
+            long = FeatureBuilder(cfg).run(extended, requested_col=flag)
+        wide = self._panel_builder.transform(long)
         self._warn_prices_outside_spline_support(wide)
 
         dataset = MultiProductDataset(wide, self.layout, period_col=cfg.schema.period)
