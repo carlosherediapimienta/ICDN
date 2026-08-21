@@ -199,7 +199,7 @@ class ICDNModel:
             return rows
 
         schema = self.config.schema
-        grouped = rows.groupby([schema.store, "product", "competitor", "kind"], observed=True)
+        grouped = rows.groupby([schema.store, schema.product, "competitor", "kind"], observed=True)
         summary = grouped["elasticity"].agg(
             elasticity="mean",
             std="std",
@@ -430,12 +430,12 @@ class ICDNModel:
         frames = []
         for i, product in enumerate(products):
             block = wide[[schema.store, schema.period]].copy()
-            block["product"] = product
+            block[schema.product] = product
             for name, values in matrices.items():
                 block[name] = values[:, i]
             frames.append(block)
         return pd.concat(frames, ignore_index=True).sort_values(
-            [schema.store, schema.period, "product"], kind="stable"
+            [schema.store, schema.period, schema.product], kind="stable"
         ).reset_index(drop=True)
 
     def _elasticity_rows(
@@ -448,14 +448,16 @@ class ICDNModel:
         products = self.layout.products
         n = len(products)
 
-        selector = self._model.head.neighbor_selector
-        if selector is not None and selector.frozen_pairs is not None:
-            pairs = selector.frozen_pairs.cpu().numpy()
-            cross = list(zip(pairs[0].tolist(), pairs[1].tolist(), strict=True))
-        else:
-            cross = [(i, j) for i in range(n) for j in range(n) if i != j]
-
-        entries = [(i, i, "own") for i in range(n)] + [(i, j, "cross") for i, j in cross]
+        entries = [(i,i, "own") for i in range(n)]
+        
+        if self.config.use_cross:
+            selector = self._model.head.neighbor_selector
+            if selector is not None and selector.frozen_pairs is not None:
+                pairs = selector.frozen_pairs.cpu().numpy()
+                cross = list(zip(pairs[0].tolist(), pairs[1].tolist(), strict=True))
+            else:
+                cross = [(i, j) for i in range(n) for j in range(n) if i != j]
+            entries += [(i, j, "cross") for i, j in cross]
 
         frames = []
         for i, j, kind in entries:
@@ -463,7 +465,7 @@ class ICDNModel:
             if not observed.any():
                 continue
             block = wide.loc[observed, [schema.store, schema.period]].copy()
-            block["product"] = products[i]
+            block[schema.product] = products[i]
             block["competitor"] = products[j]
             block["kind"] = kind
             block["elasticity"] = E[observed, i, j]
@@ -471,7 +473,7 @@ class ICDNModel:
 
         if not frames:
             return pd.DataFrame(
-                columns=[schema.store, schema.period, "product", "competitor", "kind", "elasticity"]
+                columns=[schema.store, schema.period, schema.product, "competitor", "kind", "elasticity"]
             )
         return pd.concat(frames, ignore_index=True)
 

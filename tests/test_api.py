@@ -16,11 +16,21 @@ def test_predict_returns_one_row_per_store_period_and_product(panel, config):
     model = ICDNModel(config).fit(panel)
     predictions = model.predict()
 
-    expected = ["store_code", "week_id", "product", "predicted_demand"]
+    expected = [config.schema.store, config.schema.period, config.schema.product, "predicted_demand"]
     assert set(expected) <= set(predictions.columns)
     assert predictions["predicted_demand"].notna().all()
-    assert predictions["product"].nunique() == 4
+    assert predictions[config.schema.product].nunique() == 4
 
+def test_elasticities_omit_cross_when_use_cross_is_false(panel, config):
+    config.use_cross = False
+    model = ICDNModel(config).fit(panel)
+    elasticities = model.elasticities()
+    raw = model.elasticities(aggregate=False)
+
+    assert set(elasticities["kind"]) == {"own"}
+    assert (elasticities[config.schema.product] == elasticities["competitor"]).all()
+    assert set(raw["kind"]) == {"own"}
+    assert (raw[config.schema.product] == raw["competitor"]).all()
 
 def test_elasticities_cover_own_and_cross_effects(panel, config):
     model = ICDNModel(config).fit(panel)
@@ -28,7 +38,7 @@ def test_elasticities_cover_own_and_cross_effects(panel, config):
 
     assert set(elasticities["kind"]) == {"own", "cross"}
     own = elasticities[elasticities["kind"] == "own"]
-    assert (own["product"] == own["competitor"]).all()
+    assert (own[config.schema.product] == own["competitor"]).all()
     assert {"temporal_q025", "temporal_q975", "n_obs"} <= set(elasticities.columns)
 
 
@@ -36,7 +46,7 @@ def test_raw_elasticities_keep_one_row_per_observation(panel, config):
     model = ICDNModel(config).fit(panel)
     raw = model.elasticities(aggregate=False)
 
-    assert "week_id" in raw.columns
+    assert config.schema.period in raw.columns
     assert len(raw) > len(model.elasticities())
 
 
