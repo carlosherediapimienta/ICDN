@@ -400,8 +400,14 @@ class ICDNModel:
 
         # Prepend the training tail so lag/rolling windows cross the train boundary
         if self._train_tail is not None and not self._train_tail.empty:
-            first_period = panel[cfg.schema.period].min()
-            tail = self._train_tail[self._train_tail[cfg.schema.period] < first_period]
+            store, product, period = cfg.schema.store, cfg.schema.product, cfg.schema.period
+            first_by_series = (
+                panel.groupby([store, product], as_index=False)[period]
+                .min()
+                .rename(columns={period: "_first"})
+            )
+            tail = self._train_tail.merge(first_by_series, on=[store, product], how="inner")
+            tail = tail.loc[tail[period] < tail["_first"]].drop(columns=["_first"])
             extended = pd.concat([tail, panel], ignore_index=True) if not tail.empty else panel
         else:
             extended = panel
