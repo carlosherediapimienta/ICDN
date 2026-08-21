@@ -1,5 +1,6 @@
 """User-facing configuration for the ICDN pipeline."""
 
+import math
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
@@ -57,6 +58,12 @@ class PanelSchema:
             raise ValueError(
                 f"the panel is missing required columns {missing}. "
                 f"Adjust PanelSchema if your columns have different names."
+            )
+        missing_optional = [c for c in self.optional.values() if c not in columns]
+        if missing_optional:
+            raise ValueError(
+                f"the panel is missing optional columns {missing_optional} "
+                f"that are set in PanelSchema. Add them or set those schema fields to None."
             )
 
 
@@ -149,15 +156,53 @@ class ICDNConfig:
         if any(w < 1 for w in self.rolling_windows):
             raise ValueError("every rolling window must be >= 1")
         lo, hi = self.own_elasticity_bounds
+        if not (math.isfinite(float(lo)) and math.isfinite(float(hi))):
+            raise ValueError("own_elasticity_bounds must be finite")
         if lo >= hi:
             raise ValueError(f"own_elasticity_bounds are inverted: {lo} >= {hi}")
         lo, hi = self.cross_elasticity_bounds
+        if not (math.isfinite(float(lo)) and math.isfinite(float(hi))):
+            raise ValueError("cross_elasticity_bounds must be finite")
         if lo >= hi:
             raise ValueError(f"cross_elasticity_bounds are inverted: {lo} >= {hi}")
         if self.min_coverage < 0.0 or self.min_coverage > 1.0:
             raise ValueError("min_coverage must be in [0, 1]")
         if self.min_products is not None and self.min_products < 1:
             raise ValueError("min_products must be >= 1 when set")
+
+        if self.n_products is not None and self.n_products < 2:
+            raise ValueError("n_products must be >= 2 when set")
+        if self.lambda_smooth < 0:
+            raise ValueError("lambda_smooth must be >= 0")
+        if self.lambda_elast < 0:
+            raise ValueError("lambda_elast must be >= 0")
+        if self.huber_delta <= 0:
+            raise ValueError("huber_delta must be > 0")
+        if self.lr <= 0:
+            raise ValueError("lr must be > 0")
+        if self.warmup_lr <= 0:
+            raise ValueError("warmup_lr must be > 0")
+        if self.weight_decay < 0:
+            raise ValueError("weight_decay must be >= 0")
+        if self.grad_clip <= 0:
+            raise ValueError("grad_clip must be > 0")
+        if self.smoothing_window < 1:
+            raise ValueError("smoothing_window must be >= 1")
+        if not self.seasonal_periods:
+            raise ValueError("seasonal_periods must be a non-empty tuple of positive integers")
+        if any(p < 1 for p in self.seasonal_periods):
+            raise ValueError("every seasonal period must be >= 1")
+        if self.num_workers < 0:
+            raise ValueError("num_workers must be >= 0")
+        if not self.hidden:
+            raise ValueError("hidden must be a non-empty tuple of positive widths")
+        if any(w < 1 for w in self.hidden):
+            raise ValueError("every hidden width must be >= 1")
+        allowed_act = {"gelu", "tanh", "softplus"}
+        if self.activation not in allowed_act:
+            raise ValueError(
+                f"activation {self.activation!r} is unknown, use one of {sorted(allowed_act)}"
+            )
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "ICDNConfig":

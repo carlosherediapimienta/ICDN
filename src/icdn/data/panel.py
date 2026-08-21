@@ -205,6 +205,19 @@ class PanelBuilder:
         if df.empty:
             raise ValueError("none of the modelled products appear in this panel")
 
+        if self.config.min_products is not None:
+            counts = df.groupby([store, period])[product].nunique()
+            dense = counts[counts >= self.config.min_products].index
+            df = (
+                df.set_index([store, period])
+                .loc[lambda d: d.index.isin(dense)]
+                .reset_index()
+            )
+            if df.empty:
+                raise ValueError(
+                    "no store-period has at least min_products modelled products"
+                )
+
         price = self._pivot(df, LOG_PRICE, products)
         # Prices must exist for every position, so gaps are carried forward and
         # backward inside each store before falling back to the column mean.

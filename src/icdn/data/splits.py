@@ -57,6 +57,13 @@ class TemporalSplitter:
             )
 
         holdout = n_periods - min_train
+        if holdout < n_folds:
+            raise ValueError(
+                f"not enough periods for {n_folds} expanding folds: "
+                f"{n_periods} distinct {self.period_col} values leave {holdout} "
+                f"validation periods after min_train_frac={min_train_frac} "
+                f"(need at least {n_folds}). Lower n_folds or provide more history."
+            )
         val_size = max(1, holdout // n_folds)
 
         folds = []
@@ -64,7 +71,6 @@ class TemporalSplitter:
             train_end = min_train + i * val_size
             if train_end >= n_periods:
                 break
-            # Last fold absorbs the remainder so weeks at the end are evaluated
             if i == n_folds - 1:
                 val_end = n_periods
             else:
@@ -78,8 +84,11 @@ class TemporalSplitter:
                 continue
             folds.append((train, val))
 
-        if not folds:
-            raise ValueError("expanding_splits produced no folds; check n_folds and history length")
+        if len(folds) != n_folds:
+            raise ValueError(
+                f"expanding_splits produced {len(folds)} folds, expected {n_folds}. "
+                "Not enough periods for the requested protocol."
+            )
         return folds
 
     # --- Helpers
@@ -107,6 +116,8 @@ class BlockBootstrapSampler:
         block_size: int = 4,
         rng: np.random.Generator | None = None,
     ):
+        if block_size < 1:
+            raise ValueError("block_size must be >= 1")
         self.period_col = period_col
         self.block_size = block_size
         self.rng = rng or np.random.default_rng()
@@ -119,28 +130,28 @@ class BlockBootstrapSampler:
             return df[df[self.period_col].isin(periods)].copy()
 
         length = self.block_size
-        # Overlapping starts: every week can appear in some block.
-        starts = list(range(0, n_periods - length + 1))
+        starts = list(range(0, n_periods, length))  # non-overlapping partition
         n_blocks = int(np.ceil(n_periods / length))
         chosen = self.rng.choice(len(starts), size=n_blocks, replace=True)
 
         pieces = []
         next_id = 0
-        # Leave a hole so gap-aware lag_1 does not treat block joints as consecutive.
         gap = 1
         kept = 0
         for idx in chosen:
             if kept >= n_periods:
                 break
             start = int(starts[idx])
-            # Last block
-            take = min(length, n_periods - kept)
-            block_periods = periods[start : start + take]
+            block_periods = periods[start : start + length]
+            take = min(len(block_periods), n_periods - kept)
+            block_periods = block_periods[:take]
             chunk = df[df[self.period_col].isin(block_periods)].copy()
-            remap = {old: next_id + offset for offset, old in enumerate(block_periods)}
+            origin = int(block_periods[0])
+            remap = {old: next_id + int(old) - origin for old in block_periods}
             chunk[self.period_col] = chunk[self.period_col].map(remap)
             pieces.append(chunk)
             kept += take
-            next_id += take + gap
+            span = int(block_periods[-1]) - origin + 1
+            next_id += span + gap
 
         return pd.concat(pieces, ignore_index=True)

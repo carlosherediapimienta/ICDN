@@ -51,6 +51,14 @@ class FeatureBuilder:
                 "before calling fit(); a silent mean after log() is not valid."
             )
 
+        for col in (store, product, period):
+            if df[col].isna().any():
+                raise ValueError(f"{col} contains null values")
+
+        period_vals = pd.to_numeric(df[period], errors="coerce")
+        if not np.isfinite(period_vals).all():
+            raise ValueError(f"{period} must be a finite integer week index")
+
         price = pd.to_numeric(df[schema.price], errors="coerce")
         units = pd.to_numeric(df[schema.units], errors="coerce")
         if not np.isfinite(price).all() or not np.isfinite(units).all():
@@ -61,10 +69,34 @@ class FeatureBuilder:
                 "Pass levels, not logs."
             )
 
-        if schema.size is not None and schema.size in df.columns:
+        promo = pd.to_numeric(df[schema.promo], errors="coerce")
+        if not np.isfinite(promo).all() or not promo.isin((0, 1)).all():
+            raise ValueError(
+                f"{schema.promo} must be a binary flag (0 or 1). "
+                "Non-numeric values are not treated as zero."
+            )
+
+        if schema.size is not None:
             size = pd.to_numeric(df[schema.size], errors="coerce")
+            if not np.isfinite(size).all():
+                raise ValueError(f"{schema.size} must be finite")
             if (size < 0).any():
                 raise ValueError(f"{schema.size} must be non-negative")
+
+        static_cols = [
+            c for c in (schema.brand, schema.style, schema.category, schema.size)
+            if c is not None
+        ]
+        if static_cols:
+            n_values = df.groupby(product, observed=True)[static_cols].nunique(dropna=False)
+            bad = n_values[(n_values > 1).any(axis=1)]
+            if not bad.empty:
+                sku = bad.index[0]
+                cols = [c for c in static_cols if int(bad.loc[sku, c]) > 1]
+                raise ValueError(
+                    f"product {sku!r} has inconsistent static metadata in {cols}. "
+                    "Brand, style, category and size must be constant per SKU."
+                )
 
     def run(self, panel: pd.DataFrame, requested_col: str | None = None) -> pd.DataFrame:
         self._validate_panel(panel)
@@ -263,7 +295,7 @@ class FeatureBuilder:
         return df
 
     def _add_promo(self, df: pd.DataFrame) -> pd.DataFrame:
-        promo = pd.to_numeric(df[self.schema.promo], errors="coerce").fillna(0.0)
+        promo = pd.to_numeric(df[self.schema.promo], errors="raise")
         df["promo"] = promo.astype(float)
         self.product_features.append("promo")
 

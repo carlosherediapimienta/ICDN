@@ -88,10 +88,11 @@ config = ICDNConfig(
 )
 ```
 
-Defaults reproduce the configuration selected by the hyperparameter search of
-the original study, so they are a reasonable starting point for weekly retail
-data. Configurations can also be loaded from YAML with
-`ICDNConfig.from_yaml("configs/default.yaml")`.
+Defaults follow the hyperparameter search of the original study and are a
+reasonable starting point for weekly retail data. They do not reproduce the
+published architecture: this package includes a product-identity embedding
+that the paper experiments did not use. See the README. Configurations can 
+also be loaded from YAML with `ICDNConfig.from_yaml("configs/default.yaml")`.
 
 ## 5. Reading the outputs
 

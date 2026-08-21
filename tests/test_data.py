@@ -5,7 +5,7 @@ import torch
 from icdn.data.features import LOG_PRICE
 
 from icdn.data import (
-    FeatureBuilder, MultiProductDataset, PanelBuilder, TemporalSplitter
+    FeatureBuilder, MultiProductDataset, PanelBuilder, TemporalSplitter, BlockBootstrapSampler
 )
 from icdn.model.splines import SplineBuilder
 
@@ -15,6 +15,87 @@ def build_wide(panel, config):
     builder = PanelBuilder(config)
     wide = builder.fit_transform(long_df, features.shared_features, features.product_features)
     return builder.layout, wide
+
+def test_block_bootstrap_rejects_non_positive_block_size():
+    with pytest.raises(ValueError, match="block_size"):
+        BlockBootstrapSampler(block_size=0)
+
+def test_expanding_splits_rejects_too_few_periods_for_the_requested_folds():
+    df = pd.DataFrame({"week_id": [0, 1, 2, 3]})
+    splitter = TemporalSplitter(period_col="week_id")
+    with pytest.raises(ValueError, match="not enough periods"):
+        splitter.expanding_splits(df, n_folds=5, min_train_frac=0.5)
+
+def test_block_bootstrap_uses_non_overlapping_starts():
+    """Overlapping moving blocks would offer n - L + 1 starts, not ceil(n / L)."""
+    periods = list(range(10))
+    df = pd.DataFrame({"week_id": periods, "x": periods})
+
+    class _Rng:
+        def choice(self, a, size=None, replace=True):
+            assert a == 3  # starts 0, 4, 8 — overlapping would be 7
+            return np.zeros(size, dtype=int)
+
+    out = BlockBootstrapSampler(block_size=4, rng=_Rng()).sample(df, periods)
+    # Three copies of [0,1,2,3] with a 1-week hole between blocks.
+    assert set(out["week_id"]) == {0, 1, 2, 3, 5, 6, 7, 8, 10, 11}
+
+
+def test_block_bootstrap_preserves_calendar_gaps():
+    df = pd.DataFrame(
+        {
+            "week_id": [1, 3, 5, 7],
+            "store_code": "S0",
+            "x": [1, 2, 3, 4],
+        }
+    )
+
+    class _Rng:
+        def choice(self, a, size=None, replace=True):
+            return np.zeros(size, dtype=int)  # always [1, 3]
+
+    out = BlockBootstrapSampler(block_size=2, rng=_Rng()).sample(df, [1, 3, 5, 7])
+    # Two copies of [1, 3] → [0, 2] and [4, 6], not compressed to consecutive ids.
+    assert set(out["week_id"]) == {0, 2, 4, 6}
+
+def test_min_products_drops_sparse_store_periods_from_the_wide_panel(config):
+    config.min_products = 2
+    config.n_products = None
+    config.min_coverage = 0.0
+
+    schema = config.schema
+    rows = []
+    for week, products in [(1, ["A", "B", "C"]), (2, ["A"])]:
+        for sku in products:
+            rows.append(
+                {
+                    schema.store: "S0",
+                    schema.product: sku,
+                    schema.period: week,
+                    schema.price: 2.0,
+                    schema.units: 10.0,
+                    schema.promo: 0,
+                    schema.category: "beverages",
+                    schema.brand: "B0",
+                    schema.style: "T0",
+                    schema.size: 0.33,
+                }
+            )
+    panel = pd.DataFrame(rows)
+
+    features = FeatureBuilder(config)
+    long_df = features.fit_transform(panel)
+    builder = PanelBuilder(config)
+    wide = builder.fit_transform(
+        long_df, features.shared_features, features.product_features
+    )
+
+    assert set(wide[schema.period]) == {1}
+    assert (wide[schema.store] == "S0").all()
+
+    # The bug is in transform(original), not only in fit().
+    again = builder.transform(long_df)
+    assert set(again[schema.period]) == {1}
 
 def test_spline_basis_uses_observed_prices_not_imputed_wide(panel, config):
     """Knots/shift/scale must come from observed train prices, not imputed fills."""

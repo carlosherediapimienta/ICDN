@@ -2,7 +2,45 @@ import pandas as pd
 import pytest
 
 from icdn import ICDNModel
-from icdn.data import TemporalSplitter
+from icdn.data import TemporalSplitter, PanelBuilder, FeatureBuilder
+
+def test_warmup_validation_smoothing_uses_train_history(panel, config):
+    """Warm-up val targets must roll across the train/val boundary."""
+    config.smoothing_window = 3
+    features = FeatureBuilder(config)
+    long_df = features.run(panel)
+    builder = PanelBuilder(config)
+    wide = builder.fit_transform(long_df, features.shared_features, features.product_features)
+    layout = builder.layout
+
+    store, period = config.schema.store, config.schema.period
+    train_wide, val_wide = TemporalSplitter(period_col=period).single_split(
+        wide, train_frac=1.0 - config.validation_fraction
+    )
+    val_wide = val_wide.reset_index(drop=True)
+
+    model = ICDNModel(config)
+    model.layout = layout
+    got = model._build_loaders(train_wide, val_wide)["warmup_val"].dataset.demands.numpy()
+
+    isolated = model._smooth(val_wide.reset_index(drop=True))
+    first = val_wide[period].idxmin() if False else val_wide[period].min()
+    row = val_wide[val_wide[period] == first].index[0]
+    s = val_wide.loc[row, store]
+    i = 0
+
+    hist = (
+        train_wide[(train_wide[store] == s) & (train_wide[f"obs_mask_{i}"] > 0)]
+        .sort_values(period)
+        .tail(config.smoothing_window - 1)[f"log_demand_{i}"]
+    )
+    y0 = float(val_wide.loc[row, f"log_demand_{i}"])
+    expected = float(pd.concat([hist, pd.Series([y0])], ignore_index=True).mean())
+
+    assert isolated[f"log_demand_{i}"].iloc[row] == pytest.approx(y0)
+    assert got[row, i] == pytest.approx(expected)
+    assert got[row, i] != pytest.approx(y0)
+
 
 def test_prepare_keeps_requested_store_product_period_support(panel, config):
     """The train tail must not reappear as current observations.

@@ -89,7 +89,7 @@ class ICDNModel:
             )
 
         # Save enough history so lag/rolling features are correct at inference time
-        n_tail = max(list(cfg.lags) + list(cfg.rolling_windows))
+        n_tail = max(list(cfg.lags) + list(cfg.rolling_windows) + [cfg.smoothing_window])
         _store, _product, _period = cfg.schema.store, cfg.schema.product, cfg.schema.period
         self._train_tail = (
             train_raw
@@ -378,7 +378,20 @@ class ICDNModel:
 
         if cfg.warmup_epochs > 0:
             loaders["warmup_train"] = factory.train(dataset(self._smooth(train_wide)))
-            loaders["warmup_val"] = factory.evaluate(dataset(self._smooth(val_wide)))
+
+            store, period = cfg.schema.store, cfg.schema.period
+            n_tail = max(list(cfg.lags) + list(cfg.rolling_windows) + [cfg.smoothing_window])
+            train_hist = (
+                train_wide
+                .sort_values([store, period])
+                .groupby(store, group_keys=False)
+                .tail(n_tail)
+            )
+            combined = pd.concat([train_hist, val_wide], ignore_index=True)
+            smoothed = self._smooth(combined)
+            val_keys = val_wide[[store, period]].drop_duplicates()
+            val_smooth = val_keys.merge(smoothed, on=[store, period], how="left")
+            loaders["warmup_val"] = factory.evaluate(dataset(val_smooth))
 
         return loaders
 
