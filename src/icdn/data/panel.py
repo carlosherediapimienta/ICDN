@@ -74,6 +74,7 @@ class PanelBuilder:
         self.schema = config.schema
         self.layout: PanelLayout | None = None
         self._price_fallback_mean: pd.Series | None = None
+        self._price_hist: pd.DataFrame | None = None
 
     # ── Fit ─────────────────────────────────────────────────────────────────
 
@@ -103,6 +104,7 @@ class PanelBuilder:
         self.layout = layout
         price_pivot = self._pivot(filtered, LOG_PRICE, products)
         self._price_fallback_mean = price_pivot.mean()
+        self._price_hist = price_pivot
         return self
 
     def _select_products(self, df: pd.DataFrame) -> list:
@@ -189,6 +191,26 @@ class PanelBuilder:
         if self.schema.size is not None and self.schema.size in static.columns:
             sizes = pd.to_numeric(static.loc[layout.products, self.schema.size], errors="coerce")
             layout.sizes = sizes.astype(float).tolist()
+    
+    def _fill_prices(self, obs: pd.DataFrame) -> pd.DataFrame:
+        """Observed: last past store-product price, otherwise train mean."""
+        hist = self._price_hist
+        if hist is not None:
+            cols = list(obs.columns)
+            combined = pd.concat([hist.reindex(columns=cols), obs])
+            combined = combined[~combined.index.duplicated(keep="last")]
+            combined = combined.sort_index()
+        else:
+            combined = obs.sort_index()
+        combined = combined.groupby(level = 0, group_keys=False).ffill()
+        fallback = (
+            self._price_fallback_mean
+            if self._price_fallback_mean is not None
+            else combined.mean()
+        )
+        combined = combined.fillna(fallback)
+        return combined.reindex(obs.index)
+
 
     # ── Transform ───────────────────────────────────────────────────────────
 
@@ -219,11 +241,7 @@ class PanelBuilder:
                 )
 
         price = self._pivot(df, LOG_PRICE, products)
-        # Prices must exist for every position, so gaps are carried forward and
-        # backward inside each store before falling back to the column mean.
-        price = price.groupby(level=0, group_keys=False).apply(lambda g: g.ffill().bfill())
-        fallback = self._price_fallback_mean if self._price_fallback_mean is not None else price.mean()
-        price = price.fillna(fallback)
+        price = self._fill_prices(price)
         if price.isna().any().any():
             missing = price.columns[price.isna().all()].tolist()
             raise ValueError(
