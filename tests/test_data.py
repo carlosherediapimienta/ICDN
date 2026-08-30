@@ -16,6 +16,77 @@ def build_wide(panel, config):
     wide = builder.fit_transform(long_df, features.shared_features, features.product_features)
     return builder.layout, wide
 
+def test_panel_builder_does_not_backfill_future_prices(panel, config):
+    """Gaps must not be filled with a later price (temporal leakage)."""
+    schema = config.schema
+    store, product, period = schema.store, schema.product, schema.period
+
+    features = FeatureBuilder(config)
+    long_df = features.fit_transform(panel)
+    builder = PanelBuilder(config)
+    builder.fit(long_df, features.shared_features, features.product_features)
+    products = builder.layout.products
+    sku = products[0]
+    s = long_df[store].iloc[0]
+    i = products.index(sku)
+    price_col = f"log_price_{i}"
+
+    def log_price_at(df, week):
+        hit = df[(df[store] == s) & (df[product] == sku) & (df[period] == week)]
+        return float(hit[LOG_PRICE].iloc[0])
+
+    def filled_at(wide, week):
+        row = wide[(wide[store] == s) & (wide[period] == week)]
+        return float(row[price_col].iloc[0])
+
+    past, hole, future = 9, 10, 11
+    past_px = log_price_at(long_df, past)
+    future_px = log_price_at(long_df, future)
+    assert past_px != pytest.approx(future_px)
+
+    # Middle gap: ffill from the past, never bfill from the next week.
+    gappy = long_df.copy()
+    gappy.loc[
+        (gappy[store] == s) & (gappy[product] == sku) & (gappy[period] == hole),
+        LOG_PRICE,
+    ] = np.nan
+    wide = builder.transform(gappy)
+    got = filled_at(wide, hole)
+    assert got == pytest.approx(past_px)
+    assert got != pytest.approx(future_px)
+
+    # Leading gap: hole already in train, so hist has no past price.
+    # Fill must be the train mean, not the first future week (bfill).
+    first = int(long_df[period].min())
+    second_px = log_price_at(long_df, first + 1)
+    leading = long_df.copy()
+    leading.loc[
+        (leading[store] == s) & (leading[product] == sku) & (leading[period] == first),
+        LOG_PRICE,
+    ] = np.nan
+    builder_lead = PanelBuilder(config)
+    builder_lead.fit(leading, features.shared_features, features.product_features)
+    wide_lead = builder_lead.transform(leading)
+    got_lead = filled_at(wide_lead, first)
+    mean_px = float(builder_lead._price_fallback_mean[sku])
+    assert got_lead == pytest.approx(mean_px)
+    assert got_lead != pytest.approx(second_px)
+
+    # Holdout gap: inherit last train price via hist, not the first val price.
+    train_long = long_df[long_df[period] <= past]
+    val_long = long_df[long_df[period] >= hole].copy()
+    holdout = PanelBuilder(config)
+    holdout.fit(train_long, features.shared_features, features.product_features)
+    val_long.loc[
+        (val_long[store] == s) & (val_long[product] == sku) & (val_long[period] == hole),
+        LOG_PRICE,
+    ] = np.nan
+    wide_val = holdout.transform(val_long)
+    got_val = filled_at(wide_val, hole)
+    last_train = log_price_at(train_long, past)
+    assert got_val == pytest.approx(last_train)
+    assert got_val != pytest.approx(future_px)
+
 def test_block_bootstrap_rejects_non_positive_block_size():
     with pytest.raises(ValueError, match="block_size"):
         BlockBootstrapSampler(block_size=0)

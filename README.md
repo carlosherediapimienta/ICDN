@@ -82,12 +82,6 @@ icdn elasticities --model artifacts/model.icdn --data panel.parquet --out elasti
 - [Getting started](docs/getting-started.md) covers the data contract, the
   configuration reference and how training works.
 
-## Development
-
-```bash
-pip install icdn
-```
-
 ## License
 
 See [LICENSE](LICENSE).
