@@ -157,7 +157,7 @@ class IntegrableDemandHead(nn.Module):
 
         params = self.param_head.run(h, pairs=pairs, linear_warmup=linear_warmup)
 
-        y_hat, eps_hat, E = self.demand_calc.run(
+        y_hat, own_elasticity, cross_elasticity, E = self.demand_calc.run(
             b=params["b"],
             beta=params["beta"],
             w=params["w"],
@@ -172,10 +172,12 @@ class IntegrableDemandHead(nn.Module):
             return_E=return_E,
         )
         
+        params["own_elasticity"] = own_elasticity
+        params["cross_elasticity"] = cross_elasticity
         params["attn_weights"] = attn_weights
         if return_E and E is not None:
             params["E"] = E
-        return y_hat, eps_hat, params
+        return y_hat, own_elasticity, params
 
     def forward(self, *args, **kwargs):
         return self.run(*args, **kwargs)

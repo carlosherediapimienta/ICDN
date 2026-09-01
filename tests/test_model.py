@@ -232,3 +232,62 @@ def test_validation_uses_train_frozen_graph_not_val_batch():
     assert "pairs" in seen
     assert torch.equal(seen["pairs"], train_pairs)
     assert selector.frozen_pairs is None  # online mode restored
+
+
+def test_sparse_elasticity_loss_matches_dense_reference():
+    """Sparse elasticity penalty must reproduce the dense-matrix loss and its
+    gradients, and the training path must never materialize a (B, n, n) tensor.
+    """
+    torch.manual_seed(0)
+    model = build_network(n=4)
+    batch = make_batch(B=6, n=4)
+    batch["obs_mask"] = torch.tensor([
+        [1., 1., 0., 0.],
+        [1., 1., 1., 1.],
+        [1., 0., 1., 1.],
+        [0., 0., 0., 0.],  # fully masked row: must not contribute
+        [1., 1., 1., 0.],
+        [1., 1., 1., 1.],
+    ])
+
+    loss_fn = Trainer(ICDNConfig(device="cpu", verbose=False, lambda_elast=1.0))._build_loss()
+
+    # One forward pass materializes both E and own/cross, so both losses
+    # share the same graph and the same parameters: an apples-to-apples
+    # comparison of value AND gradients.
+    y_hat, _, aux = model(batch, return_parts=True, compute_E=True)
+
+    common = dict(
+        y_true=batch["demands"], obs_mask=batch["obs_mask"],
+        w=aux["w"], ddBx=aux["ddBx"], u=aux["u"], Bx=aux["Bx"], pairs=aux["pairs"],
+        attn_weights=aux["attn_weights"],
+    )
+    loss_dense, logs_dense = loss_fn(y_hat, E=aux["E"], **common)
+    loss_sparse, logs_sparse = loss_fn(
+        y_hat,
+        own_elasticity=aux["own_elasticity"],
+        cross_elasticity=aux["cross_elasticity"],
+        **common,
+    )
+
+    torch.testing.assert_close(logs_dense["loss_elast"], logs_sparse["loss_elast"])
+    torch.testing.assert_close(loss_dense, loss_sparse)
+
+    params = [p for p in model.parameters() if p.requires_grad]
+    grads_dense = torch.autograd.grad(
+        loss_dense, params, retain_graph=True, allow_unused=True
+        )
+    grads_sparse = torch.autograd.grad(
+        loss_sparse, params, retain_graph=True, allow_unused=True
+        )
+    for g_dense, g_sparse in zip(grads_dense, grads_sparse, strict=True):
+        if g_dense is None or g_sparse is None:
+            continue
+        assert g_dense is not None and g_sparse is not None
+        torch.testing.assert_close(g_dense, g_sparse)
+
+    # The actual point of the optimization: training must not build (B, n, n).
+    _, _, aux_train = model(batch, return_parts=True, compute_E=False)
+    assert "E" not in aux_train
+    assert aux_train["own_elasticity"].shape == (6, 4)
+    assert aux_train["cross_elasticity"].shape[0] == 6
