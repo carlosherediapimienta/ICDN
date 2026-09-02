@@ -10,6 +10,22 @@ class DemandCalculator:
     Cross-price terms are added only for the directed pairs selected by the
     neighbor graph, weighted by the attention of each edge.
     """
+    @staticmethod   
+    def _materialize_dense_elasticity(
+        own: torch.Tensor, # (B, n)
+        cross: torch.Tensor, # (B, P), P = n * k
+        pairs: torch.Tensor, # (2, P)
+    ) -> torch.Tensor:
+        batch_size, n_products = own.shape
+        result = own.new_zeros(batch_size, n_products, n_products)
+
+        diag = torch.arange(n_products, device=own.device)
+        result[:, diag, diag] = own
+        
+        if pairs.numel() > 0:
+            result[:, pairs[0], pairs[1]] = cross
+        
+        return result
 
     def run(
         self,
@@ -33,10 +49,10 @@ class DemandCalculator:
             eps_hat: (B, n) own-price elasticity, the diagonal of E.
             E: (B, n, n) full elasticity matrix, or None when return_E is False.
         """
-        B, n, _ = Bx.shape
+        B, _, _ = Bx.shape
 
         y_hat = b + beta * x + (w * Bx).sum(dim=-1)
-        eps_hat = beta + (w * dBx).sum(dim=-1)
+        own_elasticity_without_cross = beta + (w * dBx).sum(dim=-1)
 
         has_cross = (
             u is not None
@@ -45,12 +61,10 @@ class DemandCalculator:
             and u.numel() > 0
         )
         if not has_cross:
-            E = None
-            if return_E:
-                E = torch.zeros(B, n, n, device=Bx.device, dtype=Bx.dtype)
-                diag = torch.arange(n, device=Bx.device)
-                E[:, diag, diag] = eps_hat
-            return y_hat, eps_hat, E
+            own_elasticity = own_elasticity_without_cross
+            cross_elasticity = None
+            E = self._materialize_dense_elasticity(own_elasticity, cross_elasticity, pairs) if return_E else None
+            return y_hat, own_elasticity, cross_elasticity, E
 
         i_idx, j_idx = pairs[0], pairs[1]
         Bx_i, Bx_j = Bx[:, i_idx, :], Bx[:, j_idx, :]
@@ -66,34 +80,27 @@ class DemandCalculator:
 
         # Only the bilinear term depends on x_i, so it is the sole cross
         # contribution to the own-price elasticity.
-        contrib_eps = torch.einsum("bpk,bpkl,bpl->bp", dBx_i, u, Bx_j).to(Bx.dtype)
+        contrib_elasticity_own = torch.einsum("bpk,bpkl,bpl->bp", dBx_i, u, Bx_j).to(Bx.dtype)
 
         if attn_weights is not None:
             contrib_y = contrib_y * attn_weights.to(Bx.dtype)
-            contrib_eps = contrib_eps * attn_weights.to(Bx.dtype)
+            contrib_elasticity_own = contrib_elasticity_own * attn_weights.to(Bx.dtype)
 
         # Each pair contributes to its focal product i, so contributions are
         # scattered back from the edge axis onto the product axis.
         i_exp = i_idx.unsqueeze(0).expand(B, -1)
         y_hat = y_hat.scatter_add(1, i_exp, contrib_y)
-        eps_hat = eps_hat.scatter_add(1, i_exp, contrib_eps)
-
-        E = None
-        if return_E:
-            E = torch.zeros(B, n, n, device=Bx.device, dtype=Bx.dtype)
-            diag = torch.arange(n, device=Bx.device)
-            E[:, diag, diag] = eps_hat
-
-            E_cross = (
-                beta_cross
+        own_elasticity = own_elasticity_without_cross.scatter_add(1, i_exp, contrib_elasticity_own)
+        
+        cross_elasticity = (
+                beta_cross 
                 + (w_cross * dBx_j).sum(dim=-1)
                 + torch.einsum("bpk,bpkl,bpl->bp", Bx_i, u, dBx_j)
-            ).to(E.dtype)
-            if attn_weights is not None:
-                E_cross = E_cross * attn_weights.to(E.dtype)
+                ).to(Bx.dtype)
+        if attn_weights is not None:
+            cross_elasticity = cross_elasticity * attn_weights.to(Bx.dtype)
+        E = self._materialize_dense_elasticity(own_elasticity, cross_elasticity, pairs) if return_E else None
 
-            # Pairs are directed: E_ij and E_ji are learned independently and
-            # no symmetry is imposed.
-            E[:, i_idx, j_idx] = E_cross
+        return y_hat, own_elasticity, cross_elasticity, E
 
-        return y_hat, eps_hat, E
+

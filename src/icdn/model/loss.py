@@ -77,7 +77,6 @@ class ElasticityLoss(nn.Module):
         r_own: float = 0.0,
         l_cross: float = -1.0,
         r_cross: float = 1.0,
-        rho_own_low: float = 1.0,
     ):
         super().__init__()
         self.fit_loss = nn.HuberLoss(delta=float(huber_delta), reduction="none")
@@ -86,7 +85,54 @@ class ElasticityLoss(nn.Module):
         self.lambda_elast = float(lambda_elast)
         self.l_own, self.r_own = float(l_own), float(r_own)
         self.l_cross, self.r_cross = float(l_cross), float(r_cross)
-        self.rho_own_low = float(rho_own_low)
+
+    @staticmethod
+    def _sparse_elasticity_penalty(
+        own: torch.Tensor, # (B, n)
+        cross: torch.Tensor | None, # (B, P), P = n * k
+        pairs: torch.Tensor, # (2, P)
+        obs_mask: torch.Tensor, # (B, n)
+        own_bounds: tuple[float, float],
+        cross_bounds: tuple[float, float],
+    ) -> torch.Tensor:
+        
+        mask = obs_mask.to(dtype=own.dtype)
+        own_mask = mask
+        
+        own_lo, own_hi = own_bounds
+        own_penalty = (
+            F.relu(own - own_hi).square()
+            + F.relu(own_lo - own).square()
+        )
+
+        if cross is None or pairs is None or pairs.numel() == 0:
+            count = own_mask.sum(dim=1)
+            total = (own_penalty * own_mask).sum(dim=1)
+        else:
+            cross_lo, cross_hi = cross_bounds 
+
+            i_idx, j_idx = pairs[0], pairs[1]
+            cross_mask = mask[:, i_idx] * mask[:, j_idx]
+            
+            cross_penalty = (
+                F.relu(cross - cross_hi).square()
+                + F.relu(cross_lo - cross).square()
+            )
+
+            count = own_mask.sum(dim=1) + cross_mask.sum(dim=1)
+            total = (
+                (own_penalty * own_mask).sum(dim=1)
+                + (cross_penalty * cross_mask).sum(dim=1)
+            )
+
+        per_observation = total / count.clamp_min(min=1.0)
+        valid = count > 0 
+
+        return (
+            per_observation[valid].mean()
+            if valid.any()
+            else own.new_tensor(0.0)
+        )
 
     def run(
         self,
@@ -100,6 +146,8 @@ class ElasticityLoss(nn.Module):
         pairs: torch.Tensor,
         E: torch.Tensor | None = None,
         attn_weights: torch.Tensor | None = None,
+        own_elasticity: torch.Tensor | None = None,
+        cross_elasticity: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
 
         huber = self.fit_loss(y_hat, y_true)
@@ -114,48 +162,58 @@ class ElasticityLoss(nn.Module):
 
         diag = torch.arange(E.shape[1], device=E.device) if E is not None else None
 
-        if self.lambda_elast > 0.0 and E is not None:
-            _, n, _ = E.shape
+        if self.lambda_elast > 0.0:
+            if own_elasticity is not None:
+                loss_elast = self._sparse_elasticity_penalty(
+                    own=own_elasticity, cross=cross_elasticity, pairs=pairs, obs_mask=obs_mask,
+                    own_bounds=(self.l_own, self.r_own), cross_bounds=(self.l_cross, self.r_cross)
+                )
+            elif E is not None:
+                _, n, _ = E.shape
 
-            bounds_low = E.new_full((n, n), self.l_cross)
-            bounds_high = E.new_full((n, n), self.r_cross)
-            rho = E.new_ones(n, n)
-            bounds_low[diag, diag] = self.l_own
-            bounds_high[diag, diag] = self.r_own
-            rho[diag, diag] = self.rho_own_low
+                bounds_low = E.new_full((n, n), self.l_cross)
+                bounds_high = E.new_full((n, n), self.r_cross)
+                bounds_low[diag, diag] = self.l_own
+                bounds_high[diag, diag] = self.r_own
 
-            # Normalize over observed diagonal and active edges.
-            m = obs_mask.float()
-            M = m.unsqueeze(2) * m.unsqueeze(1)
-            
-            active = torch.eye(n, device=E.device, dtype=E.dtype)
-            if pairs is not None and pairs.numel() > 0:
-                active[pairs[0], pairs[1]] = 1.0
-            active_mask = M * active.unsqueeze(0)
+                # Normalize over observed diagonal and active edges.
+                m = obs_mask.float()
+                M = m.unsqueeze(2) * m.unsqueeze(1)
+                
+                active = torch.eye(n, device=E.device, dtype=E.dtype)
+                if pairs is not None and pairs.numel() > 0:
+                    active[pairs[0], pairs[1]] = 1.0
+                active_mask = M * active.unsqueeze(0)
 
-            upper_viol = F.relu(E - bounds_high.unsqueeze(0)) ** 2
-            lower_viol = F.relu(bounds_low.unsqueeze(0) - E) ** 2
-            penalty = upper_viol + rho.unsqueeze(0) * lower_viol
-            loss_elast = _mean_per_observation(penalty, active_mask)
+                upper_viol = F.relu(E - bounds_high.unsqueeze(0)) ** 2
+                lower_viol = F.relu(bounds_low.unsqueeze(0) - E) ** 2
+                penalty = upper_viol + lower_viol
+                loss_elast = _mean_per_observation(penalty, active_mask)
+            else:
+                loss_elast = y_hat.new_tensor(0.0)
         else:
             loss_elast = y_hat.new_tensor(0.0)
 
         loss = loss_fit + self.lambda_smooth * loss_smooth + self.lambda_elast * loss_elast
 
-        eps_hat = E[:, diag, diag].detach() if E is not None else y_hat.new_zeros(y_hat.shape)
+        own_elasticity_detached = own_elasticity.detach() if own_elasticity is not None else(
+            E[:, diag, diag].detach() if E is not None else y_hat.new_zeros(y_hat.shape)
+        )
         logs = {
             "loss": loss.detach(),
             "loss_fit": loss_fit.detach(),
             "loss_smooth": loss_smooth.detach(),
             "loss_elast": loss_elast.detach(),
-            "eps_mean": eps_hat.mean(),
-            "eps_p50": eps_hat.median(),
+            "eps_mean": own_elasticity_detached.mean(),
+            "eps_p50": own_elasticity_detached.median(),
             "obs_frac": obs_mask.mean().detach(),
         }
         return loss, logs
 
     def forward(self, *args, **kwargs):
         return self.run(*args, **kwargs)
+
+
 
 # --- Functions 
 
@@ -173,3 +231,4 @@ def _mean_per_observation(values: torch.Tensor, mask: torch.Tensor) -> torch.Ten
     if not valid.any():
         return values.new_tensor(0.0)
     return per_obs[valid].mean()
+

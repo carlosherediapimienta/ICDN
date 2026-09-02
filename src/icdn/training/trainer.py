@@ -224,11 +224,10 @@ class Trainer:
             selector.frozen_edge_bonus = prev_bonus
 
     def _compute_loss(self, model, batch, loss_fn, meta, linear_warmup: bool = False):
-        needs_E = self.config.lambda_elast > 0.0
         y_hat, _, aux = model(
             batch,
             return_parts=True,
-            compute_E=needs_E,
+            compute_E=False,
             meta=meta,
             linear_warmup=linear_warmup,
         )
@@ -253,6 +252,8 @@ class Trainer:
             aux["Bx"],
             aux["pairs"],
             E=aux.get("E"),
+            own_elasticity=aux.get("own_elasticity"),
+            cross_elasticity=aux.get("cross_elasticity"),
             attn_weights=aux.get("attn_weights"),
         )
         if not torch.isfinite(loss):
