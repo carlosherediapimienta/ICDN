@@ -148,24 +148,27 @@ class SparseNeighborSelector(nn.Module):
         """
         device = next(self.parameters()).device
 
-        acc = None
         count = 0
+        acc = None
         for h in h_iter:
             h = h.to(device)
             n = h.shape[1]
             batch_size = h.shape[0]
-            not_self, _, bonus = self._meta_bonus(meta, n, device)
+            
             Q, K = self.q_proj(h), self.k_proj(h)
-            scores = torch.bmm(Q, K.transpose(1, 2)) / self.scale
-            scores = scores + bonus.unsqueeze(0)
-            scores = scores.masked_fill(~not_self.unsqueeze(0), float("-inf"))
-            batch_sum = scores.sum(dim=0)
+            batch_sum = torch.einsum("bid,bjd->ij", Q, K)
+
             acc = batch_sum if acc is None else acc + batch_sum
             count += batch_size
 
         if acc is None or count == 0:
             raise RuntimeError("accumulate_mean_scores received an empty iterator")
-        return acc / count
+
+        not_self, _, bonus = self._meta_bonus(meta, n, device)
+        mean = (acc / (count * self.scale)) + bonus
+        mean = mean.masked_fill(~not_self, float("-inf"))
+
+        return mean
 
     def freeze_graph(
         self,
@@ -245,20 +248,22 @@ class SparseNeighborSelector(nn.Module):
             return pairs, edge_weights
 
         not_self, same_cat, bonus = self._meta_bonus(meta, n, device)
-
-        scores = torch.bmm(Q, K.transpose(1, 2)) / self.scale
-        scores = scores + bonus.unsqueeze(0)
-        scores = scores.masked_fill(~not_self.unsqueeze(0), float("-inf"))
-
-        pairs = self._build_pairs(scores.mean(dim=0), not_self, same_cat)
-        if pairs.numel() == 0:
-            return pairs, torch.empty(B, 0, dtype=h.dtype, device=device)
+        with torch.no_grad():
+            mean_scores = torch.einsum("bid,bjd->ij", Q, K) / (B * self.scale)
+            mean_scores = mean_scores + bonus
+            mean_scores = mean_scores.masked_fill(~not_self, float("-inf"))
+            pairs = self._build_pairs(mean_scores, not_self, same_cat)
+            if pairs.numel() == 0:
+                return pairs, torch.empty(B, 0, dtype=h.dtype, device=device)
 
         i_idx, j_idx = pairs[0], pairs[1]
         n_edges = i_idx.numel()
         k_eff = n_edges // n
-        edge_logits = scores[:, i_idx, j_idx].view(B, n, k_eff)
-        edge_weights = F.softmax(edge_logits, dim=-1).reshape(B, n_edges)
+
+        edge_logits = (Q[:, i_idx, :] * K[:, j_idx, :]).sum(-1) / self.scale
+        edge_logits = edge_logits + bonus[i_idx, j_idx].unsqueeze(0)
+        edge_weights = F.softmax(edge_logits.view(B, n, k_eff), dim=-1).reshape(B, n_edges)
+        
         return pairs, edge_weights
 
     def forward(self, *args, **kwargs):
