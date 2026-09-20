@@ -338,3 +338,31 @@ def test_expanding_folds_never_train_on_the_future(panel, config):
     assert len(folds) == 3
     for train, val in folds:
         assert train["week_id"].max() < val["week_id"].min()
+
+def test_empty_temporal_blocks_create_no_history_columns(panel, config):
+    config.lags = ()
+    config.rolling_windows = ()
+    config.seasonal_periods = ()
+
+    features = FeatureBuilder(config)
+    out = features.fit_transform(panel)
+
+    history = [c for c in out.columns if c.startswith(("lag_", "miss_lag_", "roll_", "miss_roll_", "sin_", "cos_"))]
+    neighbor_hist = [c for c in features.product_features if c.startswith(("neighbor_lag_", "miss_neighbor_lag_", "neighbor_roll_", "miss_neighbor_roll_"))]
+    assert history == []
+    assert neighbor_hist == []
+    assert "period_rank" in features.shared_features
+    assert len(out) == len(panel)
+
+
+def test_lags_without_rollings_skip_neighbor_roll(panel, config):
+    config.lags = (1,)
+    config.rolling_windows = ()
+
+    features = FeatureBuilder(config)
+    features.fit_transform(panel)
+
+    assert "lag_1" in features.product_features
+    assert "miss_lag_1" in features.product_features
+    assert "neighbor_lag_1" in features.product_features
+    assert not any(c.startswith("roll_") or c.startswith("neighbor_roll_") for c in features.product_features)

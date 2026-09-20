@@ -269,6 +269,8 @@ class FeatureBuilder:
         return df
 
     def _add_lags_and_rollings(self, df: pd.DataFrame) -> pd.DataFrame:
+        if not self.config.lags and not self.config.rolling_windows:
+            return df
         store, product, period = self.schema.store, self.schema.product, self.schema.period
         grid = self._week_grid(df)
 
@@ -337,7 +339,11 @@ class FeatureBuilder:
             df["same_brand_promo_share"] = _share(brand_promo - df["promo"], n_same_brand)
             self.product_features += ["n_same_brand_neighbors", "same_brand_promo_share"]
 
-        history_cols = [f"lag_{self.config.lags[0]}", f"roll_{self.config.rolling_windows[0]}"]
+        history_cols = []
+        if self.config.lags:
+            history_cols.append(f"lag_{self.config.lags[0]}")
+        if self.config.rolling_windows:
+            history_cols.append(f"roll_{self.config.rolling_windows[0]}")
         for col in history_cols:
             mean_col = f"neighbor_{col}"
             miss_col = f"miss_neighbor_{col}"

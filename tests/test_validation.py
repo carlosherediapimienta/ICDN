@@ -21,10 +21,6 @@ def test_config_rejects_invalid_hyperparameters():
         ICDNConfig(epochs=0)
     with pytest.raises(ValueError, match="n_knots"):
         ICDNConfig(n_knots=0)
-    with pytest.raises(ValueError, match="lags"):
-        ICDNConfig(lags=())
-    with pytest.raises(ValueError, match="rolling_windows"):
-        ICDNConfig(rolling_windows=())
     with pytest.raises(ValueError, match="own_elasticity_bounds"):
         ICDNConfig(own_elasticity_bounds=(0.0, -1.0))
     with pytest.raises(ValueError, match="cross_elasticity_bounds"):
@@ -47,12 +43,17 @@ def test_config_rejects_invalid_hyperparameters():
         ({"hidden": (16, 0)}, "hidden"),
         ({"activation": "relu"}, "activation"),
         ({"own_elasticity_bounds": (-np.inf, 0.0)}, "own_elasticity_bounds"),
+        ({"lags": (0,)}, "lag"),
+        ({"lags": (1, -1)}, "lag"),
+        ({"rolling_windows": (0,)}, "rolling"),
     ],
 )
 def test_config_rejects_invalid_values_at_construction(kwargs, match):
     with pytest.raises(ValueError, match=match):
         ICDNConfig(**kwargs)
 
+def test_config_allows_empty_temporal_blocks():
+    ICDNConfig(lags=(), rolling_windows=(), seasonal_periods=())
 
 def test_panel_rejects_configured_optional_column_if_missing(panel, config):
     with pytest.raises(ValueError, match="optional columns"):

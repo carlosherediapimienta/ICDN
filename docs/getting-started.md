@@ -12,13 +12,12 @@ ICDN consumes a **long panel**: one row per store, product and period.
 | Product | `product_code` | Any identifier. |
 | Period | `week_id` | Must sort chronologically. An integer week index is ideal. |
 | Price | `price` | Strictly positive, on the same basis as `units`. |
-| Units | `units` | Non-negative sales volume. |
+| Units | `units` | Strictly positive sales volume. |
 | Promotion | `on_promo` | Binary flag. |
 
 ### Optional columns
 
-These improve how competitors are chosen. Omit any of them and the model falls
-back to learned attention alone.
+These improve how competitors are chosen. Omit any of them and the model falls back to learned attention alone.
 
 | Role | Effect |
 |---|---|
@@ -34,42 +33,30 @@ You never build features by hand. `fit` generates, per product:
 - demand lags and their missing-value flags (default: 1, 2 and 4 periods),
 - trailing rolling means (default: 4 and 13 periods),
 - lifecycle counters since the product first appeared,
-- competitive context: neighbour count, promotional share of neighbours,
-  lagged neighbour demand, share of newly introduced neighbours, assortment
-  size.
+- competitive context: neighbour count, promotional share of neighbours, lagged neighbour demand, share of newly introduced neighbours, assortment size.
 
-And per store-period: a period index, Fourier seasonality (default periods 52,
-26 and 13) and promotional intensity.
+And per store-period: a period index, Fourier seasonality (default periods 52, 26 and 13) and promotional intensity.
 
-Every historical feature excludes the current period, so no future information
-reaches the model.
+Set `lags=()`, `rolling_windows=()` or `seasonal_periods=()` to disable that block. The three are independent: empty lags do not drop rolling means, and empty seasonality still keeps the period index. Neighbour lagged demand is only built when lags are enabled; the same for neighbour rolling means. Empty blocks add no columns and do not drop early observations.
+
+Every historical feature excludes the current period, so no future information reaches the model.
 
 ## 2. Choosing the products
 
-The model works on a fixed set of `n_products` positions. When
-`n_products` is set, ICDN greedily picks the products that share the densest
-store-period overlap, then drops any product observed in fewer than
-`min_coverage` of the store-period cells. Position `i` maps to
-`model.products[i]` and stays stable across scoring and checkpoints.
+The model works on a fixed set of `n_products` positions. When `n_products` is set, ICDN greedily picks the products that share the densest store-period overlap, then drops any product observed in fewer than `min_coverage` of the store-period cells. Position `i` maps to `model.products[i]` and stays stable across scoring and checkpoints.
 
-Cross-price parameters grow with the square of the number of products, so
-start around five to ten and grow from there.
+Cross-price parameters grow with the square of the number of products, so start around five to ten and grow from there.
 
 ## 3. How training works
 
 `fit` runs two phases automatically:
 
-1. **Warm-up.** Demand is smoothed with a trailing moving average, spline
-   weights are frozen and the linear price coefficient starts at a negative
-   prior. This anchors a stable downward-sloping demand curve.
-2. **Main.** Splines are released and the raw series are fitted, letting the
-   model capture non-linear price response and cross-price effects.
+1. **Warm-up.** Demand is smoothed with a trailing moving average, spline weights are frozen and the linear price coefficient starts at a negative prior. This anchors a stable downward-sloping demand curve.
+2. **Main.** Splines are released and the raw series are fitted, letting the model capture non-linear price response and cross-price effects.
 
-Afterwards the competitor graph is frozen from the average attention scores
-over the training data, which makes inference deterministic and cheaper.
+Afterwards the competitor graph is frozen from the average attention scores over the training data, which makes inference deterministic and cheaper.
 
-Both phases use early stopping on a chronological validation split, so the
-epoch settings are upper bounds rather than exact durations.
+Both phases use early stopping on a chronological validation split, so the epoch settings are upper bounds rather than exact durations.
 
 ## 4. Configuration reference
 
@@ -88,23 +75,16 @@ config = ICDNConfig(
 )
 ```
 
-Defaults reproduce the configuration selected by the hyperparameter search of
-the original study, so they are a reasonable starting point for weekly retail
-data. Configurations can also be loaded from YAML with
-`ICDNConfig.from_yaml("configs/default.yaml")`.
+Defaults reproduce the configuration selected by the hyperparameter search of the original study, so they are a reasonable starting point for weekly retail data. Configurations can also be loaded from YAML with `ICDNConfig.from_yaml("configs/default.yaml")`.
 
 ## 5. Reading the outputs
 
-`elasticities()` reports how the demand of `product` responds to a 1% change in
-the price of `competitor`:
+`elasticities()` reports how the demand of `product` responds to a 1% change in the price of `competitor`:
 
 - `kind = own` rows are own-price elasticities and should be negative.
-- `kind = cross` rows are directional. The response of A to B's price is
-  estimated independently from the response of B to A's price, so no symmetry
-  is imposed.
+- `kind = cross` rows are directional. The response of A to B's price is estimated independently from the response of B to A's price, so no symmetry is imposed.
 
-Aggregated output summarises each store and product pair across periods with
-its mean, standard deviation and percentiles 2.5/97.5 across periods (not a confidence interval). Pass `aggregate=False` for one row per observation, which is what you want when studying how elasticity moves with promotions or seasonality.
+Aggregated output summarises each store and product pair across periods with its mean, standard deviation and percentiles 2.5/97.5 across periods (not a confidence interval). Pass `aggregate=False` for one row per observation, which is what you want when studying how elasticity moves with promotions or seasonality.
 
 ## 6. Saving and serving
 
@@ -115,6 +95,4 @@ restored.score(new_panel)
 restored.elasticities(new_panel)
 ```
 
-A checkpoint holds the weights, the configuration, the panel layout, the
-identifier encoders and the frozen competitor graph. It does not store your
-data, so pass the panel explicitly after loading.
+A checkpoint holds the weights, the configuration, the panel layout, the identifier encoders and the frozen competitor graph. It does not store your data, so pass the panel explicitly after loading.
