@@ -74,6 +74,10 @@ class ICDNConfig:
     Defaults reproduce the configuration selected by the hyperparameter search
     of the original study, so a plain ``ICDNConfig()`` is a sensible starting
     point for weekly retail panels.
+
+    Clarification:
+    - lags, rolling_windows, seasonal_periods are all tuples of positive integers,
+    but can be set to an empty tuple to disable the corresponding feature.
     """
 
     # ── Data ────────────────────────────────────────────────────────────────
@@ -146,12 +150,8 @@ class ICDNConfig:
             raise ValueError("warmup_epochs must be >= 0")
         if self.n_knots < 1:
             raise ValueError("n_knots must be >= 1")
-        if not self.lags:
-            raise ValueError("lags must be a non-empty tuple of positive integers")
         if any(k < 1 for k in self.lags):
             raise ValueError("every lag must be >= 1")
-        if not self.rolling_windows:
-            raise ValueError("rolling_windows must be a non-empty tuple of positive integers")
         if any(w < 1 for w in self.rolling_windows):
             raise ValueError("every rolling window must be >= 1")
         lo, hi = self.own_elasticity_bounds
@@ -187,8 +187,6 @@ class ICDNConfig:
             raise ValueError("grad_clip must be > 0")
         if self.smoothing_window < 1:
             raise ValueError("smoothing_window must be >= 1")
-        if not self.seasonal_periods:
-            raise ValueError("seasonal_periods must be a non-empty tuple of positive integers")
         if any(p < 1 for p in self.seasonal_periods):
             raise ValueError("every seasonal period must be >= 1")
         if self.num_workers < 0:
